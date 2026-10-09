@@ -1,0 +1,36 @@
+{
+  "name": "obsidian-pdf-collation",
+  "version": "0.1.0",
+  "description": "Markdown 校订稿与 PDF 原件双栏对照 Obsidian 插件：双向跳页、抹平校订差异的文字层高亮、页块级就地改字",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit -skipLibCheck",
+    "lint": "eslint src test",
+    "test": "node --test test/*.test.ts",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "build": "npm run check && node esbuild.config.mjs production",
+    "install-vault": "npm run build && node scripts/install-to-vault.mjs"
+  },
+  "keywords": [
+    "obsidian-plugin",
+    "pdf",
+    "markdown",
+    "collation",
+    "proofreading",
+    "ocr"
+  ],
+  "author": "lihaodong",
+  "license": "MIT",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "eslint": "^10.11.0",
+    "globals": "^17.13.0",
+    "obsidian": "^1.8.7",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.71.0"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "id": "pdf-collation",
+  "name": "PDF Collation (双轨校勘)",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "将整篇 Markdown 校订稿与 PDF 原件并排对照：点页标跳页、划选文本跨层模糊高亮、页块就地改字保存。",
+  "author": "lihaodong",
+  "isDesktopOnly": false
+}
