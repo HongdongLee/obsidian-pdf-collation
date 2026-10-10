@@ -3,7 +3,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 const DEFAULT_VAULT =
-  '/Users/lihaodong/Library/Mobile Documents/iCloud~md~obsidian/Documents/硕论'
+  '/Users/lihaodong/Library/Mobile Documents/iCloud~md~obsidian/Documents'
 const vaultPath = process.env.VAULT_PATH || process.argv[2] || DEFAULT_VAULT
 
 if (!fs.existsSync(vaultPath)) {
