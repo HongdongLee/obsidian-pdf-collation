@@ -33,13 +33,21 @@ export class CollationView extends ItemView {
   private mdFile: TFile | null = null
   private pdfFile: TFile | null = null
   private splitState: SplitMarkdownResult | null = null
-  private follow = false
+  private follow = true
   private swapped = false
 
+  // 防止 MD ⇄ PDF 双向滚动联动互相触发形成死循环
+  private syncLockSource: 'md' | 'pdf' | null = null
+  private syncLockTimer = 0
+  private mdScrollTimer = 0
+  private lastMdSyncedPage = 0
+
   private rootEl!: HTMLDivElement
-  private crumbEl!: HTMLDivElement
+  private crumbEl!: HTMLSpanElement
   private pdfStatusBtn!: HTMLButtonElement
   private pageJumpInput!: HTMLInputElement
+  private pageTotalSpan!: HTMLSpanElement
+  private zoomResetBtn!: HTMLButtonElement
   private gridEl!: HTMLDivElement
   private mdPaneEl!: HTMLDivElement
   private articleEl!: HTMLElement
@@ -96,13 +104,13 @@ export class CollationView extends ItemView {
 
     this.mdPaneEl.addEventListener('click', (e) => this.onMdClick(e))
     this.mdPaneEl.addEventListener('mouseup', () => this.onMdMouseUp())
+    this.mdPaneEl.addEventListener('scroll', () => this.onMdScroll())
 
     this.pdfController = new PdfPaneController(this.gridEl, {
-      onPageChange: (page) => this.onPdfPageChange(page),
-      onPdfSelect: (text) => this.onPdfSelect(text),
+      onPageChange: (page, total) => this.onPdfPageChange(page, total),
+      onPdfSelect: (text, page) => this.onPdfSelect(text, page),
     })
 
-    // 若尚未指定文件，默认尝试加载当前活动笔记
     if (!this.mdFile) {
       const active = this.app.workspace.getActiveFile()
       if (active && active.extension.toLowerCase() === 'md') {
@@ -114,6 +122,8 @@ export class CollationView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    window.clearTimeout(this.syncLockTimer)
+    window.clearTimeout(this.mdScrollTimer)
     this.pdfController?.destroy()
     this.pdfController = null
   }
@@ -121,72 +131,103 @@ export class CollationView extends ItemView {
   async loadMarkdownFile(file: TFile): Promise<void> {
     this.mdFile = file
     ;(this.leaf as any).updateHeader?.()
-    this.crumbEl.setText(file.path)
+    this.crumbEl.setText(file.basename)
+    this.crumbEl.setAttr('title', file.path)
 
     this.pdfFile = resolvePairedPdf(this.app, file, this.plugin.settings)
     if (this.pdfFile) {
-      this.pdfStatusBtn.setText(`PDF · ${this.pdfFile.name}`)
+      this.pdfStatusBtn.setText('PDF 已配对')
+      this.pdfStatusBtn.setAttr('title', `当前绑定 PDF：${this.pdfFile.path}（点击可换绑）`)
       this.pdfStatusBtn.removeClass('is-missing')
       const url = this.app.vault.getResourcePath(this.pdfFile)
       void this.pdfController?.load(url)
     } else {
-      this.pdfStatusBtn.setText('未找到配对 PDF（点击绑定）')
+      this.pdfStatusBtn.setText('绑定 PDF')
+      this.pdfStatusBtn.setAttr('title', '未找到同名 PDF，点击从库中选择绑定')
       this.pdfStatusBtn.addClass('is-missing')
     }
 
     await this.renderMarkdownBlocks()
   }
 
+  private lockSync(source: 'md' | 'pdf', durationMs = 480): void {
+    this.syncLockSource = source
+    window.clearTimeout(this.syncLockTimer)
+    this.syncLockTimer = window.setTimeout(() => {
+      this.syncLockSource = null
+    }, durationMs)
+  }
+
   private buildHeader(): void {
     const head = this.rootEl.createDiv({ cls: 'collation-head' })
 
     const left = head.createDiv({ cls: 'collation-crumb-wrap' })
-    this.crumbEl = left.createDiv({ cls: 'collation-crumb', text: '未打开笔记' })
+    this.crumbEl = left.createSpan({ cls: 'collation-crumb', text: '未打开笔记' })
     this.pdfStatusBtn = left.createEl('button', {
       cls: 'collation-btn collation-pdf-btn',
       text: '绑定 PDF',
-      attr: { title: '点击选择或切换当前笔记绑定的 PDF 原件' },
     })
     this.pdfStatusBtn.addEventListener('click', () => this.promptBindPdf())
 
     const actions = head.createDiv({ cls: 'collation-actions' })
 
-    // 页码跳转与缩放
+    // 页码跳转：PDF [ 1 ] / 6 页
     const jumpWrap = actions.createDiv({ cls: 'collation-jump-wrap' })
+    jumpWrap.createSpan({ cls: 'collation-jump-label', text: 'PDF' })
     this.pageJumpInput = jumpWrap.createEl('input', {
       cls: 'collation-page-input',
       type: 'number',
-      attr: { placeholder: '页码', min: '1', title: '输入 PDF 页码回车跳转' },
+      attr: { placeholder: '1', min: '1', title: '输入 PDF 页码回车跳转' },
     })
+    this.pageTotalSpan = jumpWrap.createSpan({ cls: 'collation-jump-total', text: '/ - 页' })
     this.pageJumpInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         const n = Number(this.pageJumpInput.value)
-        if (n > 0) this.pdfController?.scrollToPage(n)
+        if (n > 0) {
+          this.lockSync('pdf')
+          this.pdfController?.scrollToPage(n, true)
+        }
       }
     })
 
-    const zoomOutBtn = actions.createEl('button', {
+    // 缩放控制：- 100% +
+    const zoomGroup = actions.createDiv({ cls: 'collation-zoom-group' })
+    const zoomOutBtn = zoomGroup.createEl('button', {
       cls: 'collation-btn',
       text: '−',
       attr: { title: '缩小 PDF' },
     })
-    zoomOutBtn.addEventListener('click', () => this.pdfController?.adjustZoom(-0.15))
-
-    const zoomInBtn = actions.createEl('button', {
+    this.zoomResetBtn = zoomGroup.createEl('button', {
+      cls: 'collation-btn collation-zoom-pct',
+      text: '100%',
+      attr: { title: '点击重置为自适应页宽 (100%)' },
+    })
+    const zoomInBtn = zoomGroup.createEl('button', {
       cls: 'collation-btn',
       text: '+',
       attr: { title: '放大 PDF' },
     })
-    zoomInBtn.addEventListener('click', () => this.pdfController?.adjustZoom(0.15))
+    zoomOutBtn.addEventListener('click', () => {
+      const pct = this.pdfController?.adjustZoom(-0.15) ?? 100
+      this.zoomResetBtn.setText(`${pct}%`)
+    })
+    this.zoomResetBtn.addEventListener('click', () => {
+      const pct = this.pdfController?.resetZoom() ?? 100
+      this.zoomResetBtn.setText(`${pct}%`)
+    })
+    zoomInBtn.addEventListener('click', () => {
+      const pct = this.pdfController?.adjustZoom(0.15) ?? 100
+      this.zoomResetBtn.setText(`${pct}%`)
+    })
 
-    // 滚动联动开关
+    // 双向滚动联动开关
     const followLabel = actions.createEl('label', {
       cls: 'collation-follow-toggle',
-      attr: { title: 'PDF 滚动时，Markdown 栏自动跟随到对应页块' },
+      attr: { title: '开启后，滚动左栏 Markdown 或右栏 PDF 都会双向同步翻页' },
     })
     const followInput = followLabel.createEl('input', { type: 'checkbox' })
     followInput.checked = this.follow
-    followLabel.appendText('滚动联动')
+    followLabel.appendText('双向联动')
     followInput.addEventListener('change', () => {
       this.follow = followInput.checked
     })
@@ -206,7 +247,7 @@ export class CollationView extends ItemView {
     // 在普通编辑器中打开
     const openMdBtn = actions.createEl('button', {
       cls: 'collation-btn',
-      text: '打开原笔记',
+      text: '原笔记',
       attr: { title: '在相邻标签页打开原始 Markdown 编辑器' },
     })
     openMdBtn.addEventListener('click', () => {
@@ -234,6 +275,7 @@ export class CollationView extends ItemView {
 
   private async renderMarkdownBlocks(): Promise<void> {
     if (!this.mdFile) return
+    const prevScroll = this.mdPaneEl.scrollTop
     const raw = await this.app.vault.read(this.mdFile)
     const opts = this.getPagemarkOptions()
     this.splitState = splitMarkdownByPagemarks(raw, opts)
@@ -244,9 +286,23 @@ export class CollationView extends ItemView {
       sec.dataset.blockIndex = String(block.index)
       if (block.pdfPage != null) {
         sec.dataset.pdfPage = String(block.pdfPage)
+      } else {
+        sec.addClass('cmp-block-lead')
       }
       await this.populateBlockSection(sec, block)
     }
+
+    if (prevScroll > 0) {
+      this.mdPaneEl.scrollTop = prevScroll
+    }
+  }
+
+  private formatBlockTitle(block: MarkdownPageBlock): string {
+    if (block.pdfPage == null) return '卷首说明与考证注记'
+    if (block.printPage) {
+      return `原书 p. ${block.printPage}  ·  PDF 第 ${block.pdfPage} 页`
+    }
+    return `PDF 第 ${block.pdfPage} 页`
   }
 
   private async populateBlockSection(
@@ -258,52 +314,92 @@ export class CollationView extends ItemView {
     const bar = sec.createDiv({ cls: 'cmp-block-bar' })
     const pageTag = bar.createSpan({
       cls: 'cmp-block-tag',
-      text: block.pdfPage != null ? `pdf. ${block.pdfPage}` : '卷首 / 未标页',
+      text: this.formatBlockTitle(block),
+      attr: {
+        title:
+          block.pdfPage != null
+            ? `点击让右侧 PDF 跳至第 ${block.pdfPage} 页`
+            : '卷首导言区块',
+      },
     })
     if (block.pdfPage != null) {
       pageTag.addEventListener('click', (e) => {
         e.stopPropagation()
-        this.pdfController?.scrollToPage(block.pdfPage!)
+        this.setActiveBlock(sec)
+        this.lockSync('md')
+        this.pdfController?.scrollToPage(block.pdfPage!, true)
       })
     }
 
-    const editBtn = bar.createEl('button', {
+    const barRight = bar.createDiv({ cls: 'cmp-block-bar-right' })
+    const editBtn = barRight.createEl('button', {
       cls: 'cmp-block-edit-btn',
-      text: '✎ 校改本段',
-      attr: { title: '就地修改当前页块的 Markdown 文本（⌘S 保存）' },
+      text: '✎ 校改本页',
+      attr: { title: '就地修改当前页块的 Markdown 文本（也可直接双击正文段落）' },
     })
     editBtn.addEventListener('click', (e) => {
       e.stopPropagation()
       this.openInlineBlockEditor(sec, block)
     })
 
-    const bodyEl = sec.createDiv({ cls: 'cmp-block-body' })
-    const decorated = decoratePagemarksInBlock(block.markdown, this.getPagemarkOptions())
+    // 卷首非正文元数据块默认折叠，打开视图即可直接对齐第一页正文
+    let renderTarget: HTMLElement
+    if (block.pdfPage == null && (this.splitState?.blocks.length ?? 0) > 1) {
+      const details = sec.createEl('details', { cls: 'cmp-lead-details' })
+      details.createEl('summary', {
+        cls: 'cmp-lead-summary',
+        text: '点击展开/收起卷首元数据与考证注记',
+      })
+      renderTarget = details.createDiv({ cls: 'cmp-block-body' })
+    } else {
+      renderTarget = sec.createDiv({ cls: 'cmp-block-body' })
+    }
+
+    renderTarget.addEventListener('dblclick', (e) => {
+      const target = e.target as HTMLElement
+      if (target.closest('a, button, .pagemark')) return
+      const paraText = target.closest('p, li, blockquote, h1, h2, h3, h4')?.textContent?.trim()
+      this.openInlineBlockEditor(sec, block, paraText)
+    })
+
+    const decorated = decoratePagemarksInBlock(block.markdown, {
+      ...this.getPagemarkOptions(),
+      stripLeadingMarker: block.pdfPage != null,
+    })
     await MarkdownRenderer.render(
       this.app,
       decorated,
-      bodyEl,
+      renderTarget,
       this.mdFile?.path ?? '',
       this
     )
   }
 
-  private openInlineBlockEditor(sec: HTMLElement, block: MarkdownPageBlock): void {
+  private openInlineBlockEditor(
+    sec: HTMLElement,
+    block: MarkdownPageBlock,
+    focusSubstring?: string
+  ): void {
     if (sec.querySelector('.cmp-inline-editor')) return
     const bodyEl = sec.querySelector('.cmp-block-body') as HTMLElement | null
+    const detailsEl = sec.querySelector('.cmp-lead-details') as HTMLDetailsElement | null
+    if (detailsEl) detailsEl.open = true
     if (bodyEl) bodyEl.style.display = 'none'
 
     const wrap = sec.createDiv({ cls: 'cmp-inline-editor' })
     const ta = wrap.createEl('textarea', { cls: 'cmp-inline-textarea' })
     ta.value = block.markdown
-    ta.rows = Math.max(5, Math.min(24, block.markdown.split('\n').length + 2))
+    ta.rows = Math.max(6, Math.min(26, block.markdown.split('\n').length + 3))
 
     const foot = wrap.createDiv({ cls: 'cmp-inline-foot' })
-    const hint = foot.createSpan({ cls: 'cmp-inline-hint', text: '⌘S / Ctrl+S 保存，Esc 取消' })
+    const hint = foot.createSpan({
+      cls: 'cmp-inline-hint',
+      text: '⌘S / Ctrl+S 保存修改，Esc 取消',
+    })
     const cancelBtn = foot.createEl('button', { cls: 'collation-btn', text: '取消' })
     const saveBtn = foot.createEl('button', {
       cls: 'collation-btn collation-btn-accent',
-      text: '保存修改',
+      text: '保存 (⌘S)',
     })
 
     const cancel = () => {
@@ -319,7 +415,7 @@ export class CollationView extends ItemView {
         const freshSplit = splitMarkdownByPagemarks(currentRaw, this.getPagemarkOptions())
         return replaceBlockInMarkdown(freshSplit, block.index, nextText)
       })
-      new Notice(`已保存 pdf. ${block.pdfPage ?? '卷首'} 页块修改`)
+      new Notice(`已保存 ${this.formatBlockTitle(block)}`)
       await this.renderMarkdownBlocks()
     }
 
@@ -334,13 +430,54 @@ export class CollationView extends ItemView {
         cancel()
       }
     })
+
     ta.focus()
+    if (focusSubstring && focusSubstring.length >= 4) {
+      const snippet = focusSubstring.slice(0, 12)
+      const idx = block.markdown.indexOf(snippet)
+      if (idx !== -1) {
+        ta.setSelectionRange(idx, idx)
+      }
+    }
   }
 
   private setActiveBlock(el: HTMLElement): void {
     const prev = this.articleEl.querySelector('.cmp-active')
     if (prev && prev !== el) prev.classList.remove('cmp-active')
     el.classList.add('cmp-active')
+  }
+
+  /**
+   * 左栏滚动 → 自动检测当前阅读的页块并同步右侧 PDF
+   */
+  private onMdScroll(): void {
+    if (!this.follow || this.syncLockSource === 'pdf') return
+    if (this.mdScrollTimer) return
+
+    this.mdScrollTimer = window.setTimeout(() => {
+      this.mdScrollTimer = 0
+      if (!this.follow || this.syncLockSource === 'pdf') return
+
+      const blocks = Array.from(
+        this.articleEl.querySelectorAll<HTMLElement>('.cmp-block[data-pdf-page]')
+      )
+      if (!blocks.length) return
+
+      const probe = this.mdPaneEl.scrollTop + this.mdPaneEl.clientHeight * 0.28
+      let currentBlock = blocks[0]
+      for (const b of blocks) {
+        if (b.offsetTop <= probe) currentBlock = b
+        else break
+      }
+
+      this.setActiveBlock(currentBlock)
+      const page = Number(currentBlock.dataset.pdfPage)
+      if (page > 0 && page !== this.lastMdSyncedPage && page !== this.pdfController?.currentPage) {
+        this.lastMdSyncedPage = page
+        this.lockSync('md')
+        this.pdfController?.scrollToPage(page, true)
+      }
+    }, 90)
   }
 
   private onMdClick(e: MouseEvent): void {
@@ -351,13 +488,12 @@ export class CollationView extends ItemView {
         Number(pm.dataset.page) ||
         parsePagemark(pm.textContent || '', this.getPagemarkOptions())
       if (page) {
-        this.pdfController?.scrollToPage(page)
-        new Notice(`PDF 已跳转第 ${page} 页`)
+        this.lockSync('md')
+        this.pdfController?.scrollToPage(page, true)
         return
       }
     }
 
-    // 处理内部 wikilink 点击跳转
     const internalLink = t.closest('a.internal-link') as HTMLAnchorElement | null
     if (internalLink && this.mdFile) {
       e.preventDefault()
@@ -378,7 +514,7 @@ export class CollationView extends ItemView {
         : (anchor as HTMLElement)
       : null
     if (!el0 || !this.mdPaneEl.contains(el0)) return
-    if (el0.closest('.cmp-inline-editor')) return
+    if (el0.closest('.cmp-inline-editor, .cmp-block-bar')) return
 
     const text = sel.toString().trim()
     if (text.length < 2) return
@@ -388,27 +524,30 @@ export class CollationView extends ItemView {
 
     const pageStr = blockEl?.dataset.pdfPage
     if (!pageStr) {
-      new Notice('当前段落未关联 PDF 页码（请添加如 [p. 1 / pdf. 1] 的页标）')
+      new Notice('当前为卷首注记区，未关联 PDF 页码')
       return
     }
 
     const n = Number(pageStr)
-    this.pdfController?.scrollToPage(n)
+    this.lockSync('md', 800)
     this.pdfController
       ?.highlightOnPage(n, text)
-      .then((count) => {
-        if (count > 0) {
-          new Notice(`已在 pdf. ${n} 高亮 ${count} 处对应文本`)
-        } else {
-          new Notice(`已跳转 pdf. ${n}（该页未精确匹配文字层，可能为纯图像扫描件）`)
+      .then((res) => {
+        if (res.count === 0) {
+          new Notice(`已跳至 PDF 第 ${res.page} 页（未在文字层找到完全一致文本）`)
         }
       })
       .catch(() => {})
   }
 
-  private onPdfPageChange(n: number): void {
+  /**
+   * 右栏 PDF 滚动翻页 → 左栏自动跟随到对应页块
+   */
+  private onPdfPageChange(n: number, total: number): void {
     this.pageJumpInput.value = String(n)
-    if (!this.follow) return
+    this.pageTotalSpan.setText(`/ ${total} 页`)
+
+    if (!this.follow || this.syncLockSource === 'md') return
 
     const blocks = Array.from(
       this.articleEl.querySelectorAll<HTMLElement>('.cmp-block[data-pdf-page]')
@@ -422,31 +561,68 @@ export class CollationView extends ItemView {
     }
     if (target) {
       this.setActiveBlock(target)
-      const top = target.offsetTop - 60
-      if (Math.abs(this.mdPaneEl.scrollTop - top) > 60) {
+      const top = target.offsetTop - 12
+      if (Math.abs(this.mdPaneEl.scrollTop - top) > 48) {
+        this.lockSync('pdf')
         this.mdPaneEl.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
       }
     }
   }
 
-  private onPdfSelect(text: string): void {
+  /**
+   * 右栏 PDF 划选文字 → 反查左栏对应段落并闪烁高亮
+   */
+  private onPdfSelect(text: string, pdfPage: number): void {
     const q = normalizeText(text)
     if (q.length < 2) return
 
-    const blocks = Array.from(this.articleEl.querySelectorAll<HTMLElement>('.cmp-block'))
-    for (const el of blocks) {
-      if (normalizeText(el.textContent || '').includes(q)) {
-        this.setActiveBlock(el)
-        this.mdPaneEl.scrollTo({
-          top: Math.max(0, el.offsetTop - 60),
-          behavior: 'smooth',
-        })
-        const page = el.dataset.pdfPage
-        new Notice(page ? `Markdown 已定位到 pdf. ${page} 段落` : 'Markdown 已定位对应段落')
-        return
-      }
+    for (const old of Array.from(this.articleEl.querySelectorAll('.cmp-para-flash'))) {
+      old.classList.remove('cmp-para-flash')
     }
-    new Notice('Markdown 栏未找到完全匹配文本（校订稿与 PDF 文字层存在差异）')
+
+    const allBlocks = Array.from(this.articleEl.querySelectorAll<HTMLElement>('.cmp-block'))
+    // 优先检索当前 PDF 页码对应的块，再检索其余块
+    const orderedBlocks = [
+      ...allBlocks.filter((b) => Number(b.dataset.pdfPage) === pdfPage),
+      ...allBlocks.filter((b) => Number(b.dataset.pdfPage) !== pdfPage),
+    ]
+
+    const subQuery = q.length > 10 ? q.slice(0, 10) : q
+
+    for (const blockEl of orderedBlocks) {
+      const normBlock = normalizeText(blockEl.textContent || '')
+      if (!normBlock.includes(q) && !normBlock.includes(subQuery)) continue
+
+      this.setActiveBlock(blockEl)
+
+      // 定位块内具体的段落节点（p / li / blockquote）并高亮闪烁
+      const paras = Array.from(
+        blockEl.querySelectorAll<HTMLElement>('.cmp-block-body p, .cmp-block-body li, .cmp-block-body blockquote')
+      )
+      const hitPara =
+        paras.find((p) => {
+          const np = normalizeText(p.textContent || '')
+          return np.includes(q) || np.includes(subQuery)
+        }) ?? blockEl
+
+      if (hitPara !== blockEl) {
+        hitPara.classList.add('cmp-para-flash')
+        window.setTimeout(() => hitPara.classList.remove('cmp-para-flash'), 4500)
+      }
+
+      this.lockSync('pdf', 800)
+      const offsetTop =
+        hitPara === blockEl
+          ? blockEl.offsetTop - 16
+          : blockEl.offsetTop + hitPara.offsetTop - this.mdPaneEl.clientHeight * 0.3
+      this.mdPaneEl.scrollTo({
+        top: Math.max(0, offsetTop),
+        behavior: 'smooth',
+      })
+      return
+    }
+
+    new Notice('左栏未找到对应句子（可能存在校改差异）')
   }
 
   promptBindPdf(): void {
@@ -460,7 +636,7 @@ export class CollationView extends ItemView {
       await this.app.vault.process(this.mdFile, (raw) =>
         upsertFrontmatterPdf(raw, chosenPdf.path, key)
       )
-      new Notice(`已将 ${chosenPdf.name} 绑定至当前笔记 frontmatter`)
+      new Notice(`已绑定 ${chosenPdf.name}`)
       await this.loadMarkdownFile(this.mdFile)
     }).open()
   }

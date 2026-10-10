@@ -5,8 +5,10 @@ import {
   matchTextSpans,
   normalizeText,
   parsePagemark,
+  parsePrintPage,
   replaceBlockInMarkdown,
   splitMarkdownByPagemarks,
+  stripEditorialNoise,
 } from '../src/compare.ts'
 import {
   buildPdfCandidates,
@@ -16,18 +18,27 @@ import {
   upsertFrontmatterPdf,
 } from '../src/pairing.ts'
 
-describe('normalizeText', () => {
+describe('normalizeText & stripEditorialNoise', () => {
   it('normalizes spaces, hyphens, smart quotes, CJK corner quotes, and dashes', () => {
     const mdSide = '“戏剧人类学”——一种跨文化的身体-技术（Body-Technique）'
     const pdfSide = '「戏剧人类学」 - 一种跨文化的 身体 - 技术（Body-\u00ADTechnique）'
     assert.equal(normalizeText(mdSide), normalizeText(pdfSide))
   })
+
+  it('strips editorial notes ［校按：...］, footnotes, and inline pagemarks before matching', () => {
+    const raw =
+      '歌舞剧《窈窕淑女》［校按：原误作「窃窕淑女」］在1990年代香港上演[^1] [p. 72 / pdf. 1]'
+    const stripped = stripEditorialNoise(raw)
+    assert.equal(stripped.trim(), '歌舞剧《窈窕淑女》在1990年代香港上演')
+  })
 })
 
-describe('parsePagemark', () => {
-  it('parses SOP dual pagemarks [p. X / pdf. Y]', () => {
+describe('parsePagemark & parsePrintPage', () => {
+  it('parses SOP dual pagemarks [p. X / pdf. Y] and printed page label', () => {
     assert.equal(parsePagemark('[p. 33 / pdf. 35]'), 35)
     assert.equal(parsePagemark('[p. iv / pdf. 8]'), 8)
+    assert.equal(parsePrintPage('[p. 72 / pdf. 1]'), '72')
+    assert.equal(parsePrintPage('[p. iv / pdf. 8]'), 'iv')
   })
 
   it('parses single-track PDF markers and OCR page dividers', () => {
@@ -79,10 +90,12 @@ describe('splitMarkdownByPagemarks & replaceBlockInMarkdown', () => {
     assert.match(split.blocks[0].markdown, /卷首校勘说明/)
 
     assert.equal(split.blocks[1].pdfPage, 3)
+    assert.equal(split.blocks[1].printPage, '1')
     assert.match(split.blocks[1].markdown, /第一页正文第一段/)
     assert.match(split.blocks[1].markdown, /pdf\. 99/)
 
     assert.equal(split.blocks[2].pdfPage, 4)
+    assert.equal(split.blocks[2].printPage, '2')
     assert.match(split.blocks[2].markdown, /第二页正文/)
   })
 
@@ -97,9 +110,14 @@ describe('splitMarkdownByPagemarks & replaceBlockInMarkdown', () => {
     assert.doesNotMatch(updatedRaw, /含 OCR 错字/)
   })
 
-  it('decorates pagemarks into clickable spans inside a block', () => {
+  it('decorates pagemarks into clickable spans or strips leading marker when requested', () => {
     const decorated = decoratePagemarksInBlock('[p. 2 / pdf. 4]\n正文内容')
     assert.match(decorated, /<span class="pagemark" data-page="4"/)
+
+    const strippedLeading = decoratePagemarksInBlock('[p. 2 / pdf. 4]\n正文内容', {
+      stripLeadingMarker: true,
+    })
+    assert.equal(strippedLeading, '正文内容')
   })
 })
 
@@ -113,6 +131,17 @@ describe('matchTextSpans', () => {
     const matched = matchTextSpans(items, 'ritual theatre')
     assert.equal(matched.length, 1)
     assert.equal(matched[0].str, 'ritual-theatre')
+  })
+
+  it('matches PDF spans even when Markdown contains editorial notes and corrected typos', () => {
+    const items = [
+      { str: '本文聚焦于1990年代香港本土音乐剧的', width: 120, height: 10, transform: [1, 0, 0, 1, 10, 200] },
+      { str: '视觉操演性（visual performativity）与文化身份认同问题。', width: 180, height: 10, transform: [1, 0, 0, 1, 10, 185] },
+    ]
+    const mdParagraph =
+      '本文聚焦于1990年代香港本土音乐剧的视觉展演性［校按：原做「操演性」］（visual performativity）与文化身份认同问题。'
+    const matched = matchTextSpans(items, mdParagraph)
+    assert.equal(matched.length, 2)
   })
 })
 

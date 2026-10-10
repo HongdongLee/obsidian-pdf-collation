@@ -12,12 +12,12 @@
   --cmp-muted: var(--text-muted, #8d8477);
   --cmp-line: var(--background-modifier-border, #e4dccd);
   --cmp-accent: var(--interactive-accent, #a83a2c);
-  --cmp-active-bg: rgba(168, 58, 44, 0.08);
+  --cmp-active-bg: rgba(168, 58, 44, 0.06);
 
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 12px 16px 14px;
+  padding: 8px 12px 10px;
   background: var(--cmp-bg);
   color: var(--cmp-ink);
   box-sizing: border-box;
@@ -27,29 +27,33 @@
   box-sizing: border-box;
 }
 
-/* 顶部工具栏 */
+/* 顶部紧凑单行工具栏 */
 .pdf-collation-root .collation-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--cmp-line);
   flex-wrap: wrap;
 }
 
 .pdf-collation-root .collation-crumb-wrap {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
+  flex: 1;
 }
 
 .pdf-collation-root .collation-crumb {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 320px;
 }
 
 .pdf-collation-root .collation-actions {
@@ -60,13 +64,18 @@
 }
 
 .pdf-collation-root .collation-btn {
-  font-size: 12.5px;
-  padding: 4px 10px;
-  border-radius: 6px;
+  font-size: 12px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 5px;
   border: 1px solid var(--cmp-line);
   background: var(--cmp-panel);
   color: var(--cmp-ink);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
 }
 
 .pdf-collation-root .collation-btn:hover {
@@ -79,31 +88,71 @@
   color: #fff;
 }
 
+.pdf-collation-root .collation-pdf-btn {
+  font-size: 11.5px;
+  height: 24px;
+  padding: 0 8px;
+  color: var(--cmp-muted);
+}
+
 .pdf-collation-root .collation-pdf-btn.is-missing {
   border-style: dashed;
   color: var(--cmp-accent);
 }
 
-.pdf-collation-root .collation-page-input {
-  width: 68px;
-  font-size: 12.5px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--cmp-line);
+.pdf-collation-root .collation-jump-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--cmp-muted);
   background: var(--cmp-panel);
+  border: 1px solid var(--cmp-line);
+  border-radius: 5px;
+  height: 26px;
+  padding: 0 7px;
+}
+
+.pdf-collation-root .collation-page-input {
+  width: 42px;
+  height: 20px;
+  font-size: 12px;
+  padding: 0 4px;
+  text-align: center;
+  border-radius: 4px;
+  border: 1px solid var(--cmp-line);
+  background: var(--cmp-bg);
   color: var(--cmp-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-collation-root .collation-jump-total {
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-collation-root .collation-zoom-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pdf-collation-root .collation-zoom-pct {
+  min-width: 48px;
+  font-variant-numeric: tabular-nums;
+  color: var(--cmp-muted);
 }
 
 .pdf-collation-root .collation-follow-toggle {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12.5px;
-  color: var(--cmp-muted);
+  font-size: 12px;
+  height: 26px;
+  color: var(--cmp-ink);
   cursor: pointer;
-  padding: 4px 9px;
+  padding: 0 9px;
   border: 1px solid var(--cmp-line);
-  border-radius: 6px;
+  border-radius: 5px;
   background: var(--cmp-panel);
   user-select: none;
 }
@@ -114,7 +163,7 @@
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
+  gap: 10px;
 }
 
 .pdf-collation-root .compare-grid.swapped .cmp-md {
@@ -125,7 +174,7 @@
   order: 1;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 820px) {
   .pdf-collation-root .compare-grid {
     grid-template-columns: 1fr;
   }
@@ -141,67 +190,73 @@
 
 /* Markdown 校勘栏 */
 .pdf-collation-root .cmp-md {
-  padding: 14px 20px 36px;
+  padding: 10px 14px 36px;
 }
 
 .pdf-collation-root .cmp-article {
-  line-height: 1.9;
-  font-size: 15px;
+  line-height: 1.85;
+  font-size: 14.5px;
 }
 
 .pdf-collation-root .cmp-block {
-  padding: 8px 12px;
-  margin-bottom: 10px;
+  padding: 0 12px 10px;
+  margin-bottom: 12px;
   border-radius: 7px;
-  border: 1px solid transparent;
+  border: 1px solid var(--cmp-line);
   border-left: 3px solid var(--cmp-line);
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.pdf-collation-root .cmp-block:hover {
-  border-color: var(--cmp-line);
+  background: var(--cmp-bg);
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .pdf-collation-root .cmp-block.cmp-active {
-  background: var(--cmp-active-bg);
   border-left-color: var(--cmp-accent);
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.06);
 }
 
+/* 吸顶页块工具条：长段落滚动时始终看清当前属于哪一页，且随时可点校改 */
 .pdf-collation-root .cmp-block-bar {
+  position: sticky;
+  top: -10px;
+  z-index: 4;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 4px;
-  font-size: 11.5px;
+  padding: 6px 10px;
+  margin: 0 -12px 8px;
+  background: var(--cmp-panel);
+  border-bottom: 1px dashed var(--cmp-line);
+  border-radius: 6px 6px 0 0;
+  font-size: 12px;
+}
+
+.pdf-collation-root .cmp-block.cmp-active .cmp-block-bar {
+  background: var(--cmp-panel);
+  border-bottom-color: var(--cmp-accent);
 }
 
 .pdf-collation-root .cmp-block-tag {
-  color: var(--cmp-muted);
+  font-weight: 600;
+  color: var(--cmp-ink);
   font-variant-numeric: tabular-nums;
   cursor: pointer;
-  padding: 1px 6px;
+  padding: 2px 7px;
   border-radius: 4px;
-  background: rgba(140, 130, 115, 0.12);
+  background: rgba(168, 58, 44, 0.1);
 }
 
 .pdf-collation-root .cmp-block-tag:hover {
   color: var(--cmp-accent);
+  background: rgba(168, 58, 44, 0.18);
 }
 
 .pdf-collation-root .cmp-block-edit-btn {
-  opacity: 0;
   font-size: 11.5px;
   padding: 2px 8px;
   border-radius: 4px;
   border: 1px solid var(--cmp-line);
-  background: var(--cmp-panel);
+  background: var(--cmp-bg);
   color: var(--cmp-muted);
   cursor: pointer;
-  transition: opacity 0.15s;
-}
-
-.pdf-collation-root .cmp-block:hover .cmp-block-edit-btn {
-  opacity: 1;
 }
 
 .pdf-collation-root .cmp-block-edit-btn:hover {
@@ -209,14 +264,40 @@
   border-color: var(--cmp-accent);
 }
 
+/* 卷首元数据折叠 */
+.pdf-collation-root .cmp-lead-details {
+  font-size: 13px;
+}
+
+.pdf-collation-root .cmp-lead-summary {
+  cursor: pointer;
+  color: var(--cmp-muted);
+  font-size: 12px;
+  padding: 4px 0;
+  user-select: none;
+}
+
+.pdf-collation-root .cmp-block-body p {
+  margin: 0.6em 0;
+  text-align: justify;
+}
+
+/* PDF 反查左栏时的段落闪烁高亮 */
+.pdf-collation-root .cmp-para-flash {
+  background: rgba(255, 196, 0, 0.28);
+  border-radius: 4px;
+  outline: 2px solid rgba(216, 138, 0, 0.55);
+  transition: background 0.3s;
+}
+
 .pdf-collation-root .pagemark {
-  font-size: 0.72em;
+  font-size: 0.75em;
   color: var(--cmp-muted);
   background: rgba(140, 130, 115, 0.14);
   border-radius: 4px;
   padding: 1px 6px;
   white-space: nowrap;
-  vertical-align: 0.2em;
+  vertical-align: 0.15em;
   cursor: pointer;
 }
 
@@ -238,7 +319,7 @@
   padding: 10px 12px;
   border: 1px solid var(--cmp-accent);
   border-radius: 6px;
-  background: var(--cmp-bg);
+  background: var(--cmp-panel);
   color: var(--cmp-ink);
   resize: vertical;
 }
@@ -276,7 +357,7 @@
 
 .pdf-collation-root .pdf-pane {
   background: #e6e1d6;
-  padding: 12px 14px 36px;
+  padding: 10px 12px 36px;
 }
 
 .theme-dark .pdf-collation-root .pdf-pane {
@@ -321,13 +402,13 @@
 
 .pdf-collation-root .pdf-badge {
   position: absolute;
-  top: 16px;
-  right: 24px;
+  top: 12px;
+  right: 20px;
   z-index: 6;
   background: rgba(40, 36, 32, 0.88);
   color: #efe8da;
-  font-size: 12px;
-  padding: 4px 11px;
+  font-size: 11.5px;
+  padding: 3px 10px;
   border-radius: 999px;
   font-variant-numeric: tabular-nums;
   pointer-events: none;

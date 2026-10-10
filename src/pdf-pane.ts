@@ -16,8 +16,13 @@ export interface PdfPaneCallbacks {
   onPdfSelect: (selectedText: string, page: number) => void
 }
 
+export interface HighlightResult {
+  page: number
+  count: number
+}
+
 /**
- * 原生 DOM 驱动的虚拟化 PDF 渲染面板（复用 Obsidian 内置 loadPdfJs，零外部 worker 体积）
+ * 原生 DOM 驱动的虚拟化 PDF 渲染面板（复用 Obsidian 内置 loadPdfJs 与 cmaps 字体库）
  */
 export class PdfPaneController {
   private wrapEl: HTMLDivElement
@@ -79,6 +84,10 @@ export class PdfPaneController {
     return this.curPage || 1
   }
 
+  get zoomPercent(): number {
+    return Math.round(this.zoomFactor * 100)
+  }
+
   async load(resourceUrl: string): Promise<void> {
     this.cleanupDoc()
     this.statusEl.className = 'pdf-status'
@@ -90,7 +99,20 @@ export class PdfPaneController {
       const pdfjs: any = await loadPdfJs()
       if (this.destroyed) return
 
-      const loadingTask = pdfjs.getDocument(resourceUrl)
+      if (pdfjs.GlobalWorkerOptions && !pdfjs.GlobalWorkerOptions.workerSrc) {
+        pdfjs.GlobalWorkerOptions.workerSrc = '/lib/pdfjs/pdf.worker.min.js'
+      }
+
+      // 挂载 Obsidian 内置的 CMap 与标准字体库，确保知网/古籍等非内嵌 CJK 字体完整渲染
+      const loadingTask = pdfjs.getDocument({
+        url: resourceUrl,
+        cMapUrl: '/lib/pdfjs/cmaps/',
+        cMapPacked: true,
+        standardFontDataUrl: '/lib/pdfjs/standard_fonts/',
+        wasmUrl: '/lib/pdfjs/wasm/',
+        iccUrl: '/lib/pdfjs/iccs/',
+        isEvalSupported: false,
+      })
       const doc = await loadingTask.promise
       if (this.destroyed) {
         doc.destroy?.()
@@ -129,22 +151,27 @@ export class PdfPaneController {
     }
   }
 
-  adjustZoom(delta: number): void {
-    this.zoomFactor = Math.max(0.6, Math.min(2.4, Math.round((this.zoomFactor + delta) * 10) / 10))
+  adjustZoom(delta: number): number {
+    this.zoomFactor = Math.max(0.6, Math.min(2.4, Math.round((this.zoomFactor + delta) * 20) / 20))
     this.forceRescale()
+    return this.zoomPercent
   }
 
-  resetZoom(): void {
+  resetZoom(): number {
     this.zoomFactor = 1
     this.forceRescale()
+    return this.zoomPercent
   }
 
-  scrollToPage(n: number): void {
+  scrollToPage(n: number, smooth = false): void {
     if (!this.numPages) return
     const target = Math.max(1, Math.min(n, this.numPages))
     const c = this.containers.get(target)
     if (!c) return
-    this.paneEl.scrollTo({ top: Math.max(0, c.offsetTop - 8) })
+    this.paneEl.scrollTo({
+      top: Math.max(0, c.offsetTop - 8),
+      behavior: smooth ? 'smooth' : 'auto',
+    })
     if (this.updateTimer) {
       window.clearTimeout(this.updateTimer)
       this.updateTimer = 0
@@ -152,30 +179,57 @@ export class PdfPaneController {
     this.updateVisible()
   }
 
-  async highlightOnPage(n: number, text: string): Promise<number> {
-    if (!this.doc || n < 1 || n > this.numPages) return 0
-    const items = await this.getPageItems(n)
-    const matched = matchTextSpans(items, text)
-    if (matched.length === 0) return 0
+  /**
+   * 在目标页（及相邻跨页）查找并高亮文本，同时将高亮框滚动到 PDF 视口中央
+   */
+  async highlightOnPage(n: number, text: string): Promise<HighlightResult> {
+    if (!this.doc || n < 1 || n > this.numPages) return { page: n, count: 0 }
 
-    await this.renderPage(n)
-    const page = await this.doc.getPage(n)
-    const vp = page.getViewport({ scale: this.scale })
-    const c = this.containers.get(n)
-    if (!c) return 0
+    const candidatePages = [n]
+    if (n + 1 <= this.numPages) candidatePages.push(n + 1)
+    if (n - 1 >= 1) candidatePages.push(n - 1)
 
-    for (const old of Array.from(c.querySelectorAll('.pdf-hl-wrap'))) {
-      old.remove()
+    for (const targetPage of candidatePages) {
+      const items = await this.getPageItems(targetPage)
+      const matched = matchTextSpans(items, text)
+      if (matched.length === 0) continue
+
+      if (targetPage !== this.curPage) {
+        this.scrollToPage(targetPage)
+      }
+      await this.renderPage(targetPage)
+      const page = await this.doc.getPage(targetPage)
+      const vp = page.getViewport({ scale: this.scale })
+      const c = this.containers.get(targetPage)
+      if (!c) return { page: targetPage, count: 0 }
+
+      for (const old of Array.from(this.innerEl.querySelectorAll('.pdf-hl-wrap'))) {
+        old.remove()
+      }
+
+      const wrap = document.createElement('div')
+      wrap.className = 'pdf-hl-wrap'
+      let minTop = Infinity
+      for (const item of matched) {
+        const rect = createHighlightRect(item, vp, this.scale)
+        const topVal = parseFloat(rect.style.top)
+        if (Number.isFinite(topVal) && topVal < minTop) minTop = topVal
+        wrap.append(rect)
+      }
+      c.append(wrap)
+
+      // 将高亮位置滚到 PDF 面板可视区域中部
+      if (Number.isFinite(minTop)) {
+        const targetScroll = Math.max(0, c.offsetTop + minTop - this.paneEl.clientHeight * 0.35)
+        this.paneEl.scrollTo({ top: targetScroll, behavior: 'smooth' })
+      }
+
+      window.setTimeout(() => wrap.remove(), 6500)
+      return { page: targetPage, count: matched.length }
     }
 
-    const wrap = document.createElement('div')
-    wrap.className = 'pdf-hl-wrap'
-    for (const item of matched) {
-      wrap.append(createHighlightRect(item, vp, this.scale))
-    }
-    c.append(wrap)
-    window.setTimeout(() => wrap.remove(), 6000)
-    return matched.length
+    this.scrollToPage(n)
+    return { page: n, count: 0 }
   }
 
   destroy(): void {
@@ -217,7 +271,7 @@ export class PdfPaneController {
 
   private computeScale(): number {
     const width = this.paneEl.clientWidth || 600
-    const fit = Math.max(0.35, Math.min(3, (width - 28) / (this.baseMeta.w || 612)))
+    const fit = Math.max(0.35, Math.min(3, (width - 24) / (this.baseMeta.w || 612)))
     this.scale = fit * this.zoomFactor
     return this.scale
   }
@@ -363,7 +417,7 @@ export class PdfPaneController {
     this.updateTimer = window.setTimeout(() => {
       this.updateTimer = 0
       this.updateVisible()
-    }, 100)
+    }, 80)
   }
 
   private handleMouseUp(): void {

@@ -5,17 +5,17 @@ export interface CollationSettings {
   pdfSubfolders: string[]
   /** 自定义页标正则（第一个捕获组或命名捕获组 (?<page>\d+) 提取页码） */
   customPagemarkPattern: string
-  /** 默认是否开启 PDF 滚动联动 */
+  /** 默认是否开启双向滚动联动 */
   defaultFollowScroll: boolean
   /** 默认是否把 PDF 放在左侧 */
   defaultSwapped: boolean
 }
 
 export const DEFAULT_SETTINGS: CollationSettings = {
-  frontmatterKeys: ['pdf', 'source_pdf', 'annotation-target', 'file'],
+  frontmatterKeys: ['pdf', 'source_pdf', 'annotation-target', 'file', 'source'],
   pdfSubfolders: ['', '原始PDF', 'PDF', 'pdfs', 'assets'],
   customPagemarkPattern: '',
-  defaultFollowScroll: false,
+  defaultFollowScroll: true,
   defaultSwapped: false,
 }
 
@@ -27,6 +27,7 @@ export interface PagemarkOptions {
 export interface MarkdownPageBlock {
   index: number
   pdfPage: number | null
+  printPage: string | null
   markerRaw: string | null
   markdown: string
   bodyStart: number

@@ -1,6 +1,4 @@
-import {
-  isPdfTextItem,
-} from './pdf-dom.ts'
+import { isPdfTextItem } from './pdf-dom.ts'
 import type {
   MarkdownPageBlock,
   PagemarkOptions,
@@ -9,32 +7,47 @@ import type {
 } from './types.ts'
 
 /**
- * 归一化：抹平人工校订文本与 PDF 文字层之间的空格、连字符、引号、破折号差异
+ * 剔除校勘文本中的人工校按注记、Markdown 脚注引用与页标，避免干扰 PDF 原文匹配
+ */
+export function stripEditorialNoise(s: string): string {
+  return s
+    .replace(/[［[【]\s*校(?:按|注|勘)[：:][^\n］\]】]*[］\]】]/g, '')
+    .replace(/\[\^[^\]]+\]/g, '')
+    .replace(/\[p\.[^\]\n/]*\/[ \t]*pdf\.[^\]\n]*\]/gi, '')
+    .replace(/\[(?:pdf|p)\.?[ \t]*\d+[^\]\n]*\]/gi, '')
+}
+
+/**
+ * 归一化：抹平人工校订文本与 PDF 文字层之间的空格、连字符、引号、破折号、方括号差异
  */
 export function normalizeText(s: string): string {
-  return s
+  return stripEditorialNoise(s)
     .replace(/[\u00AD\u200B-\u200D\uFEFF]/g, '')
     .replace(/[\u2018\u2019\u02BC]/g, "'")
     .replace(/[\u201C\u201D\u300C\u300D\u300E\u300F]/g, '"')
     .replace(/[\u2013\u2014\u2012]/g, '-')
+    .replace(/[［【]/g, '[')
+    .replace(/[］】]/g, ']')
     .replace(/[\s\u00A0\u002D]/g, '')
     .toLowerCase()
 }
 
-// 内置兼容的页标语法：
-// 1. SOP 双页标：[p. 33 / pdf. 35]
-// 2. 单轨 PDF 页标：[pdf. 35] 或 [pdf 35]
-// 3. HTML 注释页标：<!-- page 35 --> 或 <!-- pdf: 35 -->
-// 4. 分隔线页标：--- page 35 --- 或 {35}------------------------------------------------
-// 5. 印刷页标（可配合 frontmatter pdf_offset 偏移）：[p. 33]
 const BUILTIN_MARKER_SOURCE = [
   String.raw`\[p\.[^\]\n/]*\/[ \t]*pdf\.[ \t]*(\d+)[^\]\n]*\]`,
   String.raw`\[pdf\.?[ \t]*(\d+)[^\]\n]*\]`,
   String.raw`<!--[ \t]*(?:pdf|page)[ \t.:=-]*(\d+)[ \t]*-->`,
   String.raw`(?:^|\n)[ \t]*---+[ \t]*page[ \t]+(\d+)[ \t]*---+`,
   String.raw`(?:^|\n)\{(\d+)\}-{10,}`,
-  String.raw`\[p\.[ \t]*(\d+)\]`
+  String.raw`\[p\.[ \t]*(\d+)\]`,
 ].join('|')
+
+/**
+ * 提取页标中的原书印刷页码（如 `[p. 72 / pdf. 1]` -> `"72"`）
+ */
+export function parsePrintPage(text: string): string | null {
+  const m = text.match(/\[p\.[ \t]*([^\]\n/]+?)(?:[ \t]*\/|[ \t]*\])/i)
+  return m ? m[1].trim() : null
+}
 
 /**
  * 从单个页标字符串解析目标 PDF 页码
@@ -55,7 +68,6 @@ export function parsePagemark(text: string, options?: PagemarkOptions): number |
     }
   }
 
-  // 显式含 pdf 页码（[p. X / pdf. Y] 或 [pdf. Y] 或 <!-- pdf: Y -->）
   const pdfMatch =
     text.match(/pdf\.?[ \t]*(\d+)/i) ||
     text.match(/<!--[ \t]*(?:pdf|page)[ \t.:=-]*(\d+)[ \t]*-->/i) ||
@@ -66,7 +78,6 @@ export function parsePagemark(text: string, options?: PagemarkOptions): number |
     return Number.isFinite(n) && n > 0 ? n : null
   }
 
-  // 仅含印刷页码 [p. 33]：叠加上下文中配置的 pageOffset
   const printMatch = text.match(/^\[p\.[ \t]*(\d+)\]$/)
   if (printMatch) {
     const n = Number(printMatch[1]) + (options?.pageOffset ?? 0)
@@ -95,6 +106,7 @@ interface MarkerHit {
   index: number
   raw: string
   pdfPage: number
+  printPage: string | null
 }
 
 function collectMarkers(body: string, options?: PagemarkOptions): MarkerHit[] {
@@ -109,7 +121,6 @@ function collectMarkers(body: string, options?: PagemarkOptions): MarkerHit[] {
     }
   }
 
-  // 跳过 fenced code blocks，避免代码块中的示例页标把文章切碎
   const fenceRanges: [number, number][] = []
   const fenceRe = /^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$/gm
   for (const fm of body.matchAll(fenceRe)) {
@@ -132,7 +143,12 @@ function collectMarkers(body: string, options?: PagemarkOptions): MarkerHit[] {
     if (inFence(offset)) continue
     const page = parsePagemark(raw, options)
     if (page != null) {
-      hits.push({ index: offset, raw, pdfPage: page })
+      hits.push({
+        index: offset,
+        raw,
+        pdfPage: page,
+        printPage: parsePrintPage(raw),
+      })
     }
   }
   return hits
@@ -156,6 +172,7 @@ export function splitMarkdownByPagemarks(
         {
           index: 0,
           pdfPage: null,
+          printPage: null,
           markerRaw: null,
           markdown: body,
           bodyStart: 0,
@@ -167,7 +184,6 @@ export function splitMarkdownByPagemarks(
 
   const blocks: MarkdownPageBlock[] = []
 
-  // 第一个页标之前的卷首内容（若非纯空白）
   const firstHit = hits[0]
   if (firstHit.index > 0) {
     const lead = body.slice(0, firstHit.index)
@@ -175,6 +191,7 @@ export function splitMarkdownByPagemarks(
       blocks.push({
         index: blocks.length,
         pdfPage: null,
+        printPage: null,
         markerRaw: null,
         markdown: lead,
         bodyStart: 0,
@@ -183,9 +200,9 @@ export function splitMarkdownByPagemarks(
     }
   }
 
-  // 合并同一页码的连续命中，切出每个页块
   let curStart = firstHit.index
   let curPage = firstHit.pdfPage
+  let curPrintPage = firstHit.printPage
   let curMarker = firstHit.raw
 
   for (let i = 1; i < hits.length; i++) {
@@ -194,6 +211,7 @@ export function splitMarkdownByPagemarks(
     blocks.push({
       index: blocks.length,
       pdfPage: curPage,
+      printPage: curPrintPage,
       markerRaw: curMarker,
       markdown: body.slice(curStart, h.index),
       bodyStart: curStart,
@@ -201,12 +219,14 @@ export function splitMarkdownByPagemarks(
     })
     curStart = h.index
     curPage = h.pdfPage
+    curPrintPage = h.printPage
     curMarker = h.raw
   }
 
   blocks.push({
     index: blocks.length,
     pdfPage: curPage,
+    printPage: curPrintPage,
     markerRaw: curMarker,
     markdown: body.slice(curStart, body.length),
     bodyStart: curStart,
@@ -236,30 +256,86 @@ export function replaceBlockInMarkdown(
 }
 
 /**
- * 将块内页标语法转为可点击的 HTML 徽标（供 MarkdownRenderer 渲染）
+ * 将块内页标语法转为可点击的 HTML 徽标；若块首就是单独成行的主页标，则可隐藏以免与吸顶栏重复
  */
-export function decoratePagemarksInBlock(markdown: string, options?: PagemarkOptions): string {
+export function decoratePagemarksInBlock(
+  markdown: string,
+  options?: PagemarkOptions & { stripLeadingMarker?: boolean }
+): string {
   const hits = collectMarkers(markdown, options)
   if (hits.length === 0) return markdown
 
   let out = ''
   let cursor = 0
-  for (const h of hits) {
+  for (let i = 0; i < hits.length; i++) {
+    const h = hits[i]
     out += markdown.slice(cursor, h.index)
-    const escaped = h.raw
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-    out += `<span class="pagemark" data-page="${h.pdfPage}" title="跳转 pdf. ${h.pdfPage}">${escaped}</span>`
+    const isLeadingLine =
+      options?.stripLeadingMarker &&
+      i === 0 &&
+      markdown.slice(0, h.index).trim() === '' &&
+      (markdown[h.index + h.raw.length] === '\n' ||
+        markdown[h.index + h.raw.length] === '\r' ||
+        h.index + h.raw.length === markdown.length)
+
+    if (!isLeadingLine) {
+      const escaped = h.raw
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+      out += `<span class="pagemark" data-page="${h.pdfPage}" title="跳转 pdf. ${h.pdfPage}">${escaped}</span>`
+    }
     cursor = h.index + h.raw.length
+    if (isLeadingLine) {
+      while (cursor < markdown.length && (markdown[cursor] === '\r' || markdown[cursor] === '\n')) {
+        cursor++
+      }
+    }
   }
   out += markdown.slice(cursor)
   return out
 }
 
+function findBestRange(full: string, norm: string): [number, number] | null {
+  const exact = full.indexOf(norm)
+  if (exact !== -1) {
+    return [exact, exact + norm.length]
+  }
+
+  // 容错匹配：若用户在校订稿中修改过个别错字，尝试用首尾锚点区间定位
+  if (norm.length >= 8) {
+    const anchorLen = Math.min(6, Math.floor(norm.length / 3))
+    const head = norm.slice(0, anchorLen)
+    const tail = norm.slice(-anchorLen)
+    let searchFrom = 0
+    while (searchFrom < full.length) {
+      const hIdx = full.indexOf(head, searchFrom)
+      if (hIdx === -1) break
+      const maxEnd = Math.min(full.length, hIdx + Math.ceil(norm.length * 1.6) + anchorLen)
+      const windowSlice = full.slice(hIdx, maxEnd)
+      const tRel = windowSlice.lastIndexOf(tail)
+      if (tRel !== -1 && tRel >= anchorLen) {
+        return [hIdx, hIdx + tRel + anchorLen]
+      }
+      searchFrom = hIdx + 1
+    }
+  }
+
+  // 退化匹配：取前段或后段连续子串
+  if (norm.length >= 6) {
+    const subLen = Math.max(4, Math.floor(norm.length * 0.6))
+    const front = full.indexOf(norm.slice(0, subLen))
+    if (front !== -1) return [front, front + subLen]
+    const back = full.indexOf(norm.slice(-subLen))
+    if (back !== -1) return [back, back + subLen]
+  }
+
+  return null
+}
+
 /**
- * 在单页 PDF 的 textContent.items 中匹配归一化查询串，返回命中的 PdfTextItem 列表
+ * 在单页 PDF 的 textContent.items 中匹配归一化查询串（支持容错锚点匹配），返回命中的 PdfTextItem 列表
  */
 export function matchTextSpans(items: readonly unknown[], query: string): PdfTextItem[] {
   const norm = normalizeText(query)
@@ -274,9 +350,9 @@ export function matchTextSpans(items: readonly unknown[], query: string): PdfTex
     full += ns
   }
 
-  const idx = full.indexOf(norm)
-  if (idx === -1) return []
-  const end = idx + norm.length
+  const range = findBestRange(full, norm)
+  if (!range) return []
+  const [idx, end] = range
 
   const matched: PdfTextItem[] = []
   for (const s of spans) {
