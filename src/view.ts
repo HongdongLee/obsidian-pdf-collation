@@ -7,7 +7,7 @@ import {
 } from 'obsidian'
 import {
   decoratePagemarksInBlock,
-  normalizeText,
+  matchSegmentSlices,
   parsePagemark,
   replaceBlockInMarkdown,
   splitMarkdownByPagemarks,
@@ -19,7 +19,12 @@ import {
 } from './pairing'
 import { PdfPaneController } from './pdf-pane'
 import { PdfSuggestModal } from './pdf-suggest-modal'
-import type { CollationSettings, MarkdownPageBlock, SplitMarkdownResult } from './types'
+import type {
+  CollationSettings,
+  MarkdownPageBlock,
+  SelectionContext,
+  SplitMarkdownResult,
+} from './types'
 
 export const VIEW_TYPE_COLLATION = 'pdf-collation-view'
 
@@ -40,7 +45,9 @@ export class CollationView extends ItemView {
   private syncLockSource: 'md' | 'pdf' | null = null
   private syncLockTimer = 0
   private mdScrollTimer = 0
+  private selectionSettleTimer = 0
   private lastMdSyncedPage = 0
+  private lastSelectionSig = ''
 
   private rootEl!: HTMLDivElement
   private crumbEl!: HTMLSpanElement
@@ -103,12 +110,19 @@ export class CollationView extends ItemView {
     this.articleEl = this.mdPaneEl.createEl('article', { cls: 'cmp-article' })
 
     this.mdPaneEl.addEventListener('click', (e) => this.onMdClick(e))
-    this.mdPaneEl.addEventListener('mouseup', () => this.onMdMouseUp())
     this.mdPaneEl.addEventListener('scroll', () => this.onMdScroll())
+
+    // 全局监听鼠标释放，确保拖选到分栏边缘或双击选词都能稳定触发双向对位高亮
+    this.registerDomEvent(document, 'mouseup', () => {
+      window.clearTimeout(this.selectionSettleTimer)
+      this.selectionSettleTimer = window.setTimeout(() => {
+        this.handleDocumentSelection()
+      }, 25)
+    })
 
     this.pdfController = new PdfPaneController(this.gridEl, {
       onPageChange: (page, total) => this.onPdfPageChange(page, total),
-      onPdfSelect: (text, page) => this.onPdfSelect(text, page),
+      onPdfSelect: (text, page, context) => this.onPdfSelect(text, page, context),
     })
 
     if (!this.mdFile) {
@@ -124,6 +138,7 @@ export class CollationView extends ItemView {
   async onClose(): Promise<void> {
     window.clearTimeout(this.syncLockTimer)
     window.clearTimeout(this.mdScrollTimer)
+    window.clearTimeout(this.selectionSettleTimer)
     this.pdfController?.destroy()
     this.pdfController = null
   }
@@ -335,7 +350,7 @@ export class CollationView extends ItemView {
     const editBtn = barRight.createEl('button', {
       cls: 'cmp-block-edit-btn',
       text: '✎ 校改本页',
-      attr: { title: '就地修改当前页块的 Markdown 文本（也可直接双击正文段落）' },
+      attr: { title: '就地修改当前页块的 Markdown 文本（也可按住 Option/Alt 双击正文段落）' },
     })
     editBtn.addEventListener('click', (e) => {
       e.stopPropagation()
@@ -356,6 +371,7 @@ export class CollationView extends ItemView {
     }
 
     renderTarget.addEventListener('dblclick', (e) => {
+      if (!e.altKey) return
       const target = e.target as HTMLElement
       if (target.closest('a, button, .pagemark')) return
       const paraText = target.closest('p, li, blockquote, h1, h2, h3, h4')?.textContent?.trim()
@@ -504,37 +520,102 @@ export class CollationView extends ItemView {
     }
   }
 
-  private onMdMouseUp(): void {
+  private clearMarkdownInlineHighlights(): void {
+    for (const mark of Array.from(this.articleEl.querySelectorAll('mark.cmp-inline-hl'))) {
+      const parent = mark.parentNode
+      while (mark.firstChild) {
+        parent?.insertBefore(mark.firstChild, mark)
+      }
+      mark.remove()
+      parent?.normalize()
+    }
+    for (const old of Array.from(this.articleEl.querySelectorAll('.cmp-para-flash'))) {
+      old.classList.remove('cmp-para-flash')
+    }
+  }
+
+  private collectBlockTextNodes(root: HTMLElement): Text[] {
+    const nodes: Text[] = []
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentElement
+        if (!parent) return NodeFilter.FILTER_REJECT
+        if (parent.closest('.pagemark, .cmp-block-bar, .cmp-inline-editor, .cmp-lead-summary')) {
+          return NodeFilter.FILTER_REJECT
+        }
+        return (node.nodeValue?.length ?? 0) > 0
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_SKIP
+      },
+    })
+    let cur = walker.nextNode()
+    while (cur) {
+      nodes.push(cur as Text)
+      cur = walker.nextNode()
+    }
+    return nodes
+  }
+
+  private handleDocumentSelection(): void {
     const sel = window.getSelection()
-    if (!sel || sel.isCollapsed) return
-    const anchor = sel.anchorNode
-    const el0 = anchor
-      ? anchor.nodeType === 3
-        ? anchor.parentElement
-        : (anchor as HTMLElement)
-      : null
-    if (!el0 || !this.mdPaneEl.contains(el0)) return
-    if (el0.closest('.cmp-inline-editor, .cmp-block-bar')) return
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return
+
+    const range = sel.getRangeAt(0)
+    const common = range.commonAncestorContainer
+    const el0 = common.nodeType === 3 ? common.parentElement : (common as HTMLElement)
+    if (!el0 || !this.rootEl.contains(el0)) return
 
     const text = sel.toString().trim()
-    if (text.length < 2) return
+    if (text.length < 1) return
+
+    // 避免同一次静止选区重复触发
+    const sig = `${this.mdPaneEl.contains(el0) ? 'md' : 'pdf'}:${text}:${range.startOffset}:${range.endOffset}`
+    if (sig === this.lastSelectionSig) return
+    this.lastSelectionSig = sig
+
+    if (this.mdPaneEl.contains(el0)) {
+      this.handleMdSelection(range, el0, text)
+    } else if (this.pdfController?.containsNode(el0)) {
+      this.pdfController.handlePdfSelectionFromWindow(sel)
+    }
+  }
+
+  private handleMdSelection(range: Range, el0: HTMLElement, text: string): void {
+    if (el0.closest('.cmp-inline-editor, .cmp-block-bar, .cmp-lead-summary')) return
+
+    this.clearMarkdownInlineHighlights()
 
     const blockEl = el0.closest('.cmp-block') as HTMLElement | null
     if (blockEl) this.setActiveBlock(blockEl)
 
-    const pageStr = blockEl?.dataset.pdfPage
-    if (!pageStr) {
-      new Notice('当前为卷首注记区，未关联 PDF 页码')
-      return
+    const bodyEl =
+      (el0.closest('.cmp-block-body') as HTMLElement | null) ?? blockEl ?? this.articleEl
+
+    let before = ''
+    let after = ''
+    try {
+      const preRange = document.createRange()
+      preRange.selectNodeContents(bodyEl)
+      preRange.setEnd(range.startContainer, range.startOffset)
+      before = preRange.toString().slice(-60)
+
+      const postRange = document.createRange()
+      postRange.selectNodeContents(bodyEl)
+      postRange.setStart(range.endContainer, range.endOffset)
+      after = postRange.toString().slice(0, 60)
+    } catch {
+      // ignore range errors
     }
 
-    const n = Number(pageStr)
-    this.lockSync('md', 800)
+    const preferredPage =
+      Number(blockEl?.dataset.pdfPage) || this.pdfController?.currentPage || 1
+
+    this.lockSync('md', 900)
     this.pdfController
-      ?.highlightOnPage(n, text)
+      ?.highlightOnPage(preferredPage, text, { before, after })
       .then((res) => {
         if (res.count === 0) {
-          new Notice(`已跳至 PDF 第 ${res.page} 页（未在文字层找到完全一致文本）`)
+          new Notice(`PDF 中未找到与选中内容匹配的文本`)
         }
       })
       .catch(() => {})
@@ -570,59 +651,106 @@ export class CollationView extends ItemView {
   }
 
   /**
-   * 右栏 PDF 划选文字 → 反查左栏对应段落并闪烁高亮
+   * 右栏 PDF 划选文字 → 反查左栏对应文本节点并包裹精确 <mark class="cmp-inline-hl"> 高亮
    */
-  private onPdfSelect(text: string, pdfPage: number): void {
-    const q = normalizeText(text)
-    if (q.length < 2) return
-
-    for (const old of Array.from(this.articleEl.querySelectorAll('.cmp-para-flash'))) {
-      old.classList.remove('cmp-para-flash')
-    }
+  private onPdfSelect(text: string, pdfPage: number, context: SelectionContext): void {
+    this.clearMarkdownInlineHighlights()
 
     const allBlocks = Array.from(this.articleEl.querySelectorAll<HTMLElement>('.cmp-block'))
-    // 优先检索当前 PDF 页码对应的块，再检索其余块
-    const orderedBlocks = [
-      ...allBlocks.filter((b) => Number(b.dataset.pdfPage) === pdfPage),
-      ...allBlocks.filter((b) => Number(b.dataset.pdfPage) !== pdfPage),
-    ]
+    if (!allBlocks.length) return
 
-    const subQuery = q.length > 10 ? q.slice(0, 10) : q
+    const priorityBlocks = allBlocks.filter((b) => {
+      const p = Number(b.dataset.pdfPage)
+      return p === pdfPage || p === pdfPage - 1 || p === pdfPage + 1
+    })
+    const prioritySet = new Set(priorityBlocks)
+    const remainingBlocks = allBlocks.filter((b) => !prioritySet.has(b))
 
-    for (const blockEl of orderedBlocks) {
-      const normBlock = normalizeText(blockEl.textContent || '')
-      if (!normBlock.includes(q) && !normBlock.includes(subQuery)) continue
+    let bestBlock: HTMLElement | null = null
+    let bestNodes: Text[] = []
+    let bestSlices: { segIdx: number; startOffset: number; endOffset: number }[] = []
+    let bestScore = -1
 
-      this.setActiveBlock(blockEl)
+    const searchGroup = (group: HTMLElement[]) => {
+      for (const blockEl of group) {
+        const bodyEl =
+          blockEl.querySelector<HTMLElement>('.cmp-block-body') ?? blockEl
+        const textNodes = this.collectBlockTextNodes(bodyEl)
+        if (!textNodes.length) continue
+        const strs = textNodes.map((n) => n.nodeValue || '')
+        const matched = matchSegmentSlices(strs, text, context)
+        if (!matched || matched.slices.length === 0) continue
 
-      // 定位块内具体的段落节点（p / li / blockquote）并高亮闪烁
-      const paras = Array.from(
-        blockEl.querySelectorAll<HTMLElement>('.cmp-block-body p, .cmp-block-body li, .cmp-block-body blockquote')
-      )
-      const hitPara =
-        paras.find((p) => {
-          const np = normalizeText(p.textContent || '')
-          return np.includes(q) || np.includes(subQuery)
-        }) ?? blockEl
-
-      if (hitPara !== blockEl) {
-        hitPara.classList.add('cmp-para-flash')
-        window.setTimeout(() => hitPara.classList.remove('cmp-para-flash'), 4500)
+        const pageBonus = Number(blockEl.dataset.pdfPage) === pdfPage ? 15 : 0
+        const totalScore = matched.score + pageBonus
+        if (totalScore > bestScore) {
+          bestScore = totalScore
+          bestBlock = blockEl
+          bestNodes = textNodes
+          bestSlices = matched.slices
+        }
       }
+    }
 
-      this.lockSync('pdf', 800)
-      const offsetTop =
-        hitPara === blockEl
-          ? blockEl.offsetTop - 16
-          : blockEl.offsetTop + hitPara.offsetTop - this.mdPaneEl.clientHeight * 0.3
-      this.mdPaneEl.scrollTo({
-        top: Math.max(0, offsetTop),
-        behavior: 'smooth',
-      })
+    searchGroup(priorityBlocks)
+    if (!bestBlock) {
+      searchGroup(remainingBlocks)
+    }
+
+    if (!bestBlock || bestSlices.length === 0) {
+      new Notice('Markdown 中未找到与选中内容匹配的文本')
       return
     }
 
-    new Notice('左栏未找到对应句子（可能存在校改差异）')
+    const targetBlock = bestBlock as HTMLElement
+    this.setActiveBlock(targetBlock)
+
+    // 若命中的是默认折叠的卷首导言块，自动展开
+    const detailsEl = targetBlock.querySelector<HTMLDetailsElement>('.cmp-lead-details')
+    if (detailsEl && !detailsEl.open) {
+      detailsEl.open = true
+    }
+
+    let firstMark: HTMLElement | null = null
+    // 逆序包裹匹配的 DOM Text 节点切片，避免切分前序节点影响后续偏移量
+    const reversed = [...bestSlices].sort((a, b) => b.segIdx - a.segIdx)
+    for (const s of reversed) {
+      const node = bestNodes[s.segIdx]
+      if (!node || !node.parentNode) continue
+      const len = node.nodeValue?.length ?? 0
+      const start = Math.max(0, Math.min(s.startOffset, len))
+      const end = Math.max(start, Math.min(s.endOffset, len))
+      if (end <= start) continue
+
+      const range = document.createRange()
+      range.setStart(node, start)
+      range.setEnd(node, end)
+      const mark = document.createElement('mark')
+      mark.className = 'cmp-inline-hl'
+      try {
+        range.surroundContents(mark)
+        firstMark = mark
+      } catch {
+        // ignore if range crosses element boundary
+      }
+    }
+
+    this.lockSync('pdf', 900)
+    if (firstMark) {
+      const paneRect = this.mdPaneEl.getBoundingClientRect()
+      const markRect = firstMark.getBoundingClientRect()
+      const targetScroll =
+        this.mdPaneEl.scrollTop + (markRect.top - paneRect.top) - this.mdPaneEl.clientHeight * 0.35
+      this.mdPaneEl.scrollTo({
+        top: Math.max(0, targetScroll),
+        behavior: 'smooth',
+      })
+    } else {
+      this.mdPaneEl.scrollTo({
+        top: Math.max(0, targetBlock.offsetTop - 16),
+        behavior: 'smooth',
+      })
+    }
   }
 
   promptBindPdf(): void {

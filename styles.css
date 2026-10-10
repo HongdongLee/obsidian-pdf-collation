@@ -274,7 +274,21 @@
   color: var(--cmp-muted);
   font-size: 12px;
   padding: 4px 0;
-  user-select: none;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+/* 显式解除 Obsidian 全局 body { user-select: none } 限制，确保 Markdown 正文可自由划选 */
+.pdf-collation-root .cmp-article,
+.pdf-collation-root .cmp-block-body,
+.pdf-collation-root .cmp-block-body * {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+  cursor: text;
+}
+
+.pdf-collation-root .cmp-block-body a {
+  cursor: pointer;
 }
 
 .pdf-collation-root .cmp-block-body p {
@@ -282,9 +296,18 @@
   text-align: justify;
 }
 
-/* PDF 反查左栏时的段落闪烁高亮 */
+/* PDF 划选反查左栏时的精确词句级高亮标记 */
+.pdf-collation-root mark.cmp-inline-hl {
+  background: rgba(255, 200, 0, 0.52);
+  color: inherit;
+  border-radius: 3px;
+  padding: 1px 0;
+  box-shadow: 0 0 0 2px rgba(216, 138, 0, 0.68);
+  animation: pdf-collation-hlflash 0.55s ease-out;
+}
+
 .pdf-collation-root .cmp-para-flash {
-  background: rgba(255, 196, 0, 0.28);
+  background: rgba(255, 196, 0, 0.25);
   border-radius: 4px;
   outline: 2px solid rgba(216, 138, 0, 0.55);
   transition: background 0.3s;
@@ -299,6 +322,8 @@
   white-space: nowrap;
   vertical-align: 0.15em;
   cursor: pointer;
+  -webkit-user-select: none !important;
+  user-select: none !important;
 }
 
 .pdf-collation-root .pagemark:hover {
@@ -322,6 +347,8 @@
   background: var(--cmp-panel);
   color: var(--cmp-ink);
   resize: vertical;
+  -webkit-user-select: text !important;
+  user-select: text !important;
 }
 
 .pdf-collation-root .cmp-inline-foot {
@@ -388,6 +415,9 @@
   font-size: 10px;
   color: #9b9282;
   font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  -webkit-user-select: none !important;
+  user-select: none !important;
 }
 
 .pdf-collation-root .pdf-status {
@@ -414,50 +444,60 @@
   pointer-events: none;
 }
 
+/* 显式解除 Obsidian 全局 user-select: none，确保 PDF 文本层可自由拖选 */
 .pdf-collation-root .textLayer {
   position: absolute;
   text-align: initial;
   inset: 0;
   overflow: hidden;
-  opacity: 0.3;
+  opacity: 0.35;
   line-height: 1;
   text-size-adjust: none;
   forced-color-adjust: none;
   transform-origin: 0 0;
+  z-index: 2;
+  -webkit-user-select: text !important;
+  user-select: text !important;
 }
 
 .pdf-collation-root .textLayer span,
+.pdf-collation-root .textLayer .textLayerNode,
 .pdf-collation-root .textLayer br {
   color: transparent;
   position: absolute;
   white-space: pre;
   cursor: text;
   transform-origin: 0% 0%;
+  -webkit-user-select: text !important;
+  user-select: text !important;
 }
 
 .pdf-collation-root .textLayer ::selection {
-  background: rgba(49, 83, 125, 0.45);
+  background: rgba(38, 102, 216, 0.42);
 }
 
 .pdf-collation-root .pdf-hl-wrap {
   position: absolute;
   inset: 0;
+  z-index: 1;
   pointer-events: none;
+  mix-blend-mode: multiply;
 }
 
 .pdf-collation-root .pdf-hl {
   position: absolute;
-  background: rgba(255, 186, 0, 0.48);
-  outline: 1px solid rgba(216, 138, 0, 0.72);
+  background: rgba(255, 200, 0, 0.55);
+  outline: 1.5px solid rgba(216, 128, 0, 0.85);
   border-radius: 2px;
-  animation: pdf-collation-hlflash 0.5s ease-out;
+  animation: pdf-collation-hlflash 0.55s ease-out;
 }
 
 @keyframes pdf-collation-hlflash {
   0% {
-    background: rgba(255, 120, 0, 0.75);
+    background: rgba(255, 110, 0, 0.8);
   }
   100% {
-    background: rgba(255, 186, 0, 0.48);
+    background: rgba(255, 200, 0, 0.55);
   }
 }
+

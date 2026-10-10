@@ -1,10 +1,12 @@
 import { loadPdfJs } from 'obsidian'
-import { matchTextSpans } from './compare'
+import { matchPdfTextSlices } from './compare'
 import {
   buildTextLayer,
-  createHighlightRect,
+  computeSliceHighlightBoxes,
+  createHighlightRectFromBox,
   createPageContainer,
 } from './pdf-dom'
+import type { PdfMatchedSlice, SelectionContext } from './types'
 
 interface PageMeta {
   w: number
@@ -13,7 +15,7 @@ interface PageMeta {
 
 export interface PdfPaneCallbacks {
   onPageChange: (page: number, totalPages: number) => void
-  onPdfSelect: (selectedText: string, page: number) => void
+  onPdfSelect: (selectedText: string, page: number, context: SelectionContext) => void
 }
 
 export interface HighlightResult {
@@ -22,7 +24,7 @@ export interface HighlightResult {
 }
 
 /**
- * 原生 DOM 驱动的虚拟化 PDF 渲染面板（复用 Obsidian 内置 loadPdfJs 与 cmaps 字体库）
+ * 原生 DOM 驱动的虚拟化 PDF 渲染面板（复用 Obsidian 内置 loadPdfJs、TextLayer 与 cmaps 字体库）
  */
 export class PdfPaneController {
   private wrapEl: HTMLDivElement
@@ -31,15 +33,19 @@ export class PdfPaneController {
   private statusEl: HTMLDivElement
   private badgeEl: HTMLDivElement
 
+  private pdfjs: any = null
   private doc: any = null
   private baseMeta: PageMeta = { w: 612, h: 792 }
   private scale = 1
   private zoomFactor = 1
   private pageSizes: PageMeta[] = []
   private containers = new Map<number, HTMLDivElement>()
-  private rendered = new Map<number, { renderTask?: any }>()
+  private rendered = new Map<number, { renderTask?: any; textLayerTask?: any }>()
   private rendering = new Set<number>()
+  private textContentCache = new Map<number, any>()
   private itemsCache = new Map<number, readonly unknown[]>()
+  private pageSpans = new Map<number, readonly (HTMLElement | null)[]>()
+  private activeHighlight: { page: number; slices: PdfMatchedSlice[] } | null = null
   private curPage = 0
   private numPages = 0
   private updateTimer = 0
@@ -73,7 +79,6 @@ export class PdfPaneController {
     parentEl.append(this.wrapEl)
 
     this.paneEl.addEventListener('scroll', () => this.scheduleUpdate())
-    this.paneEl.addEventListener('mouseup', () => this.handleMouseUp())
   }
 
   get totalPages(): number {
@@ -88,6 +93,10 @@ export class PdfPaneController {
     return Math.round(this.zoomFactor * 100)
   }
 
+  containsNode(node: Node | null): boolean {
+    return !!node && this.paneEl.contains(node)
+  }
+
   async load(resourceUrl: string): Promise<void> {
     this.cleanupDoc()
     this.statusEl.className = 'pdf-status'
@@ -98,9 +107,10 @@ export class PdfPaneController {
     try {
       const pdfjs: any = await loadPdfJs()
       if (this.destroyed) return
+      this.pdfjs = pdfjs
 
       if (pdfjs.GlobalWorkerOptions && !pdfjs.GlobalWorkerOptions.workerSrc) {
-        pdfjs.GlobalWorkerOptions.workerSrc = '/lib/pdfjs/pdf.worker.min.js'
+        pdfjs.GlobalWorkerOptions.workerSrc = '/lib/pdfjs/pdf.worker.min.mjs'
       }
 
       // 挂载 Obsidian 内置的 CMap 与标准字体库，确保知网/古籍等非内嵌 CJK 字体完整渲染
@@ -179,63 +189,159 @@ export class PdfPaneController {
     this.updateVisible()
   }
 
+  clearHighlight(): void {
+    this.activeHighlight = null
+    for (const old of Array.from(this.innerEl.querySelectorAll('.pdf-hl-wrap'))) {
+      old.remove()
+    }
+  }
+
   /**
-   * 在目标页（及相邻跨页）查找并高亮文本，同时将高亮框滚动到 PDF 视口中央
+   * 在目标页（优先当前对应页及相邻页，未命中时自动检索全篇）查找并高亮精确字符区间
    */
-  async highlightOnPage(n: number, text: string): Promise<HighlightResult> {
-    if (!this.doc || n < 1 || n > this.numPages) return { page: n, count: 0 }
+  async highlightOnPage(
+    preferredPage: number,
+    text: string,
+    context?: SelectionContext
+  ): Promise<HighlightResult> {
+    if (!this.doc || this.numPages < 1) return { page: preferredPage, count: 0 }
 
-    const candidatePages = [n]
-    if (n + 1 <= this.numPages) candidatePages.push(n + 1)
-    if (n - 1 >= 1) candidatePages.push(n - 1)
+    const clampedPref = Math.max(1, Math.min(preferredPage || 1, this.numPages))
+    const priorityPages: number[] = [clampedPref]
+    if (clampedPref + 1 <= this.numPages) priorityPages.push(clampedPref + 1)
+    if (clampedPref - 1 >= 1) priorityPages.push(clampedPref - 1)
 
-    for (const targetPage of candidatePages) {
-      const items = await this.getPageItems(targetPage)
-      const matched = matchTextSpans(items, text)
-      if (matched.length === 0) continue
+    let bestHit: { page: number; slices: PdfMatchedSlice[]; score: number } | null = null
 
-      if (targetPage !== this.curPage) {
-        this.scrollToPage(targetPage)
+    for (const p of priorityPages) {
+      const items = await this.getPageItems(p)
+      const matched = matchPdfTextSlices(items, text, context)
+      if (!matched || matched.slices.length === 0) continue
+      const pageBonus = p === clampedPref ? 15 : 0
+      const totalScore = matched.score + pageBonus
+      if (!bestHit || totalScore > bestHit.score) {
+        bestHit = { page: p, slices: matched.slices, score: totalScore }
       }
-      await this.renderPage(targetPage)
-      const page = await this.doc.getPage(targetPage)
-      const vp = page.getViewport({ scale: this.scale })
-      const c = this.containers.get(targetPage)
-      if (!c) return { page: targetPage, count: 0 }
-
-      for (const old of Array.from(this.innerEl.querySelectorAll('.pdf-hl-wrap'))) {
-        old.remove()
-      }
-
-      const wrap = document.createElement('div')
-      wrap.className = 'pdf-hl-wrap'
-      let minTop = Infinity
-      for (const item of matched) {
-        const rect = createHighlightRect(item, vp, this.scale)
-        const topVal = parseFloat(rect.style.top)
-        if (Number.isFinite(topVal) && topVal < minTop) minTop = topVal
-        wrap.append(rect)
-      }
-      c.append(wrap)
-
-      // 将高亮位置滚到 PDF 面板可视区域中部
-      if (Number.isFinite(minTop)) {
-        const targetScroll = Math.max(0, c.offsetTop + minTop - this.paneEl.clientHeight * 0.35)
-        this.paneEl.scrollTo({ top: targetScroll, behavior: 'smooth' })
-      }
-
-      window.setTimeout(() => wrap.remove(), 6500)
-      return { page: targetPage, count: matched.length }
     }
 
-    this.scrollToPage(n)
-    return { page: n, count: 0 }
+    // 若优先页及相邻页未找到，检索全篇其余页
+    if (!bestHit) {
+      const visited = new Set(priorityPages)
+      for (let p = 1; p <= this.numPages; p++) {
+        if (visited.has(p)) continue
+        const items = await this.getPageItems(p)
+        const matched = matchPdfTextSlices(items, text, context)
+        if (!matched || matched.slices.length === 0) continue
+        if (!bestHit || matched.score > bestHit.score) {
+          bestHit = { page: p, slices: matched.slices, score: matched.score }
+        }
+      }
+    }
+
+    if (!bestHit) {
+      this.scrollToPage(clampedPref, true)
+      return { page: clampedPref, count: 0 }
+    }
+
+    const { page: targetPage, slices } = bestHit
+    this.activeHighlight = { page: targetPage, slices }
+
+    if (targetPage !== this.curPage) {
+      this.scrollToPage(targetPage)
+    }
+    await this.renderPage(targetPage)
+    await this.drawHighlightOnRenderedPage(targetPage, slices, true)
+
+    return { page: targetPage, count: slices.length }
+  }
+
+  /**
+   * 处理用户在 PDF 面板内的鼠标划选：提取选中文字与前后上下文，在 PDF 本地保持高亮，并通知左栏高亮对应文本
+   */
+  handlePdfSelectionFromWindow(sel: Selection): boolean {
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false
+    const range = sel.getRangeAt(0)
+    const common = range.commonAncestorContainer
+    const el0 = common.nodeType === 3 ? common.parentElement : (common as HTMLElement)
+    if (!el0 || !this.paneEl.contains(el0)) return false
+
+    const text = sel.toString().trim()
+    if (text.length < 1) return false
+
+    const pageEl = el0.closest('.pdf-page-c') as HTMLElement | null
+    const page = Number(pageEl?.dataset.page) || this.curPage || 1
+    const textLayerEl = pageEl?.querySelector('.textLayer') as HTMLElement | null
+
+    let before = ''
+    let after = ''
+    if (textLayerEl) {
+      try {
+        const preRange = document.createRange()
+        preRange.selectNodeContents(textLayerEl)
+        preRange.setEnd(range.startContainer, range.startOffset)
+        before = preRange.toString().slice(-60)
+
+        const postRange = document.createRange()
+        postRange.selectNodeContents(textLayerEl)
+        postRange.setStart(range.endContainer, range.endOffset)
+        after = postRange.toString().slice(0, 60)
+      } catch {
+        // ignore range boundary errors
+      }
+    }
+
+    // 在 PDF 当前页同步绘制持久黄框，使左右两栏同时呈现清晰的对位高亮
+    void this.getPageItems(page).then(async (items) => {
+      const matched = matchPdfTextSlices(items, text, { before, after })
+      if (matched && matched.slices.length > 0) {
+        this.activeHighlight = { page, slices: matched.slices }
+        await this.drawHighlightOnRenderedPage(page, matched.slices, false)
+      }
+    })
+
+    this.callbacks.onPdfSelect(text, page, { before, after })
+    return true
   }
 
   destroy(): void {
     this.destroyed = true
     this.cleanupDoc()
     this.wrapEl.remove()
+  }
+
+  private async drawHighlightOnRenderedPage(
+    targetPage: number,
+    slices: readonly PdfMatchedSlice[],
+    scrollIntoCenter: boolean
+  ): Promise<void> {
+    if (!this.doc) return
+    const c = this.containers.get(targetPage)
+    if (!c) return
+
+    const page = await this.doc.getPage(targetPage)
+    const vp = page.getViewport({ scale: this.scale })
+    const spans = this.pageSpans.get(targetPage)
+
+    for (const old of Array.from(this.innerEl.querySelectorAll('.pdf-hl-wrap'))) {
+      old.remove()
+    }
+
+    const boxes = computeSliceHighlightBoxes(slices, spans, c, vp, this.scale)
+    if (boxes.length === 0) return
+
+    const wrap = document.createElement('div')
+    wrap.className = 'pdf-hl-wrap'
+    let minTop = Infinity
+    for (const box of boxes) {
+      if (box.top < minTop) minTop = box.top
+      wrap.append(createHighlightRectFromBox(box))
+    }
+    c.append(wrap)
+
+    if (scrollIntoCenter && Number.isFinite(minTop)) {
+      const targetScroll = Math.max(0, c.offsetTop + minTop - this.paneEl.clientHeight * 0.35)
+      this.paneEl.scrollTo({ top: targetScroll, behavior: 'smooth' })
+    }
   }
 
   private cleanupDoc(): void {
@@ -251,7 +357,10 @@ export class PdfPaneController {
     this.containers.clear()
     this.rendered.clear()
     this.rendering.clear()
+    this.textContentCache.clear()
     this.itemsCache.clear()
+    this.pageSpans.clear()
+    this.activeHighlight = null
     this.pageSizes = []
     this.curPage = 0
     this.numPages = 0
@@ -302,6 +411,8 @@ export class PdfPaneController {
     c.style.height = `${Math.round(m.h * this.scale)}px`
     c.style.setProperty('--scale-factor', String(this.scale))
     c.style.setProperty('--total-scale-factor', String(this.scale))
+    c.style.setProperty('--scale-round-x', '1px')
+    c.style.setProperty('--scale-round-y', '1px')
   }
 
   private clearPageDom(n: number): void {
@@ -311,10 +422,12 @@ export class PdfPaneController {
     const hadTask = !!r?.renderTask
     try {
       r?.renderTask?.cancel?.()
+      r?.textLayerTask?.cancel?.()
     } catch {
       // ignore
     }
     this.rendered.delete(n)
+    this.pageSpans.delete(n)
     for (const child of Array.from(c.querySelectorAll('canvas, .textLayer, .pdf-hl-wrap'))) {
       child.remove()
     }
@@ -354,17 +467,44 @@ export class PdfPaneController {
         canvasContext: canvas.getContext('2d')!,
         viewport: vp,
       })
-      this.rendered.set(n, { renderTask })
+      const entry: { renderTask?: any; textLayerTask?: any } = { renderTask }
+      this.rendered.set(n, entry)
       await renderTask.promise
 
-      const items = await this.getPageItems(n)
+      const tc = await this.getPageTextContent(n)
       const tl = document.createElement('div')
       tl.className = 'textLayer'
       c.append(tl)
-      buildTextLayer(items, page.getViewport({ scale }), tl)
+
+      const cssViewport = page.getViewport({ scale })
+      if (typeof this.pdfjs?.TextLayer === 'function') {
+        const tlInstance = new this.pdfjs.TextLayer({
+          textContentSource: tc,
+          container: tl,
+          viewport: cssViewport,
+        })
+        entry.textLayerTask = tlInstance
+        await tlInstance.render()
+        const tlItems = (tlInstance.textContentItems as readonly unknown[]) || []
+        const tlDivs = (tlInstance.textDivs as readonly HTMLElement[]) || []
+        if (tlItems.length > 0) {
+          this.itemsCache.set(n, tlItems)
+        }
+        this.pageSpans.set(n, tlDivs)
+      } else {
+        const items = await this.getPageItems(n)
+        const spans = buildTextLayer(items, cssViewport, tl)
+        this.pageSpans.set(n, spans)
+      }
+
+      // 若该页存在当前激活的高亮，重绘后自动恢复
+      if (this.activeHighlight && this.activeHighlight.page === n) {
+        await this.drawHighlightOnRenderedPage(n, this.activeHighlight.slices, false)
+      }
     } catch (e: any) {
       if (
         e?.name !== 'RenderingCancelledException' &&
+        e?.name !== 'AbortException' &&
         !String(e?.message || '').includes('cancel')
       ) {
         console.warn(`PDF 第 ${n} 页渲染异常`, e)
@@ -374,14 +514,24 @@ export class PdfPaneController {
     }
   }
 
-  private async getPageItems(n: number): Promise<readonly unknown[]> {
-    const cached = this.itemsCache.get(n)
+  private async getPageTextContent(n: number): Promise<any> {
+    const cached = this.textContentCache.get(n)
     if (cached) return cached
     const page = await this.doc.getPage(n)
     const tc = await page.getTextContent()
-    const items = (tc?.items as readonly unknown[]) || []
-    this.itemsCache.set(n, items)
-    return items
+    this.textContentCache.set(n, tc)
+    const rawItems = ((tc?.items as readonly unknown[]) || []).filter(
+      (it: any) => it && typeof it.str === 'string'
+    )
+    this.itemsCache.set(n, rawItems)
+    return tc
+  }
+
+  private async getPageItems(n: number): Promise<readonly unknown[]> {
+    const cached = this.itemsCache.get(n)
+    if (cached) return cached
+    await this.getPageTextContent(n)
+    return this.itemsCache.get(n) || []
   }
 
   private currentPageFromScroll(): number {
@@ -418,19 +568,5 @@ export class PdfPaneController {
       this.updateTimer = 0
       this.updateVisible()
     }, 80)
-  }
-
-  private handleMouseUp(): void {
-    const sel = window.getSelection()
-    if (!sel || sel.isCollapsed) return
-    const anchor = sel.anchorNode
-    if (!anchor || !this.paneEl.contains(anchor)) return
-    const text = sel.toString().trim()
-    if (text.length < 2) return
-    const pageEl = (
-      anchor.nodeType === 3 ? anchor.parentElement : (anchor as HTMLElement)
-    )?.closest('.pdf-page-c') as HTMLElement | null
-    const page = Number(pageEl?.dataset.page) || this.curPage || 1
-    this.callbacks.onPdfSelect(text, page)
   }
 }

@@ -51,3 +51,16 @@ export interface PdfViewport {
   scale: number
   convertToViewportPoint: (x: number, y: number) => number[]
 }
+
+export interface SelectionContext {
+  before?: string
+  after?: string
+}
+
+export interface PdfMatchedSlice {
+  itemIdx: number
+  item: PdfTextItem
+  startOffset: number
+  endOffset: number
+}
+
