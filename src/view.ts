@@ -706,7 +706,7 @@ export class CollationView extends ItemView {
     const bodyEl = sec.querySelector('.cmp-block-body') as HTMLElement | null
     const detailsEl = sec.querySelector('.cmp-lead-details') as HTMLDetailsElement | null
     if (detailsEl) detailsEl.open = true
-    if (bodyEl) bodyEl.style.display = 'none'
+    if (bodyEl) bodyEl.classList.add('cmp-hidden')
 
     const wrap = sec.createDiv({ cls: 'cmp-inline-editor' })
     const ta = wrap.createEl('textarea', { cls: 'cmp-inline-textarea' })
@@ -726,7 +726,7 @@ export class CollationView extends ItemView {
 
     const cancel = () => {
       wrap.remove()
-      if (bodyEl) bodyEl.style.display = ''
+      if (bodyEl) bodyEl.classList.remove('cmp-hidden')
     }
 
     const save = async () => {

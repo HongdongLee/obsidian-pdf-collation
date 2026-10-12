@@ -18,8 +18,8 @@ export default class PdfCollationPlugin extends Plugin {
     })
 
     this.addCommand({
-      id: 'open-pdf-collation',
-      name: '打开当前笔记的双轨校勘视图 (Open PDF Collation)',
+      id: 'open-collation',
+      name: '打开当前笔记的双轨校勘视图',
       callback: () => {
         void this.openCollationForActiveFile()
       },
@@ -82,7 +82,7 @@ export default class PdfCollationPlugin extends Plugin {
         }
         const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_COLLATION)
         if (leaves.length > 0 && leaves[0].view instanceof CollationView) {
-          this.app.workspace.revealLeaf(leaves[0])
+          void this.app.workspace.revealLeaf(leaves[0])
           void leaves[0].view.autoPaginateFromPdf()
           return
         }
@@ -189,7 +189,7 @@ export default class PdfCollationPlugin extends Plugin {
           await leaf.view.loadMarkdownFile(file, true)
         }
       }
-      this.app.workspace.revealLeaf(leaf)
+      await this.app.workspace.revealLeaf(leaf)
       return
     }
 
@@ -199,7 +199,7 @@ export default class PdfCollationPlugin extends Plugin {
       active: true,
       state: { file: file.path },
     })
-    this.app.workspace.revealLeaf(leaf)
+    await this.app.workspace.revealLeaf(leaf)
   }
 
   async loadSettings(): Promise<void> {
