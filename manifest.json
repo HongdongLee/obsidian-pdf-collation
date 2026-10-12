@@ -1,9 +1,9 @@
 {
   "id": "pdf-collation",
-  "name": "PDF Collation (双轨校勘)",
-  "version": "0.1.0",
-  "minAppVersion": "1.5.0",
-  "description": "将 Markdown 与 PDF 并排对照、双向划选高亮、一键自动分页与就地改字。Side-by-side Markdown and PDF collation with bidirectional sync, fuzzy highlighting, and inline editing.",
+  "name": "PDF Collation",
+  "version": "0.1.1",
+  "minAppVersion": "1.13.7",
+  "description": "Compare Markdown notes with PDFs side by side, synchronize text selections and pages, generate paginated drafts, and edit page blocks inline.",
   "author": "lihaodong",
   "authorUrl": "https://github.com/HongdongLee",
   "isDesktopOnly": false

@@ -86,7 +86,13 @@ VAULT_PATH="/path/to/your/vault" npm run install-vault
 
 - 从 PDF 生成 Markdown 依赖 PDF 自带的文字层；纯扫描图片 PDF 需要先运行 OCR。
 - 自动分页和容错高亮使用文本匹配，对复杂版式、严重 OCR 错误或重复段落仍需人工核对。
-- 当前为 `0.1.0` 初始版本。建议在批量分页或修改重要文献前备份笔记。
+- 当前为 `0.1.1` 初始版本，要求 Obsidian 1.13.7 或更新版本。建议在批量分页或修改重要文献前备份笔记。
+
+## Privacy and access
+
+The plugin processes Markdown and PDF files locally within your Obsidian vault. It does not use external services, send document contents to a server, collect telemetry, display ads, or require an account or payment. It uses the PDF renderer bundled with Obsidian and does not install dependencies at runtime. Note rendering uses Obsidian's Markdown renderer, so remote embeds in your own notes follow Obsidian's normal behavior.
+
+Binding a PDF updates the selected note's frontmatter. Generating a draft creates a Markdown file in the vault; auto-pagination and page-block edits update the selected Markdown file when you invoke those actions.
 
 ## License
 
