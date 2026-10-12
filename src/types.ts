@@ -55,6 +55,8 @@ export interface PdfViewport {
 export interface SelectionContext {
   before?: string
   after?: string
+  /** 选中文本起点在当前页块中的相对归一化位置 (0..1)，用于同页重复词消歧 */
+  progress?: number
 }
 
 export interface PdfMatchedSlice {

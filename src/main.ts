@@ -1,5 +1,5 @@
 import { MarkdownView, Notice, Plugin, TFile } from 'obsidian'
-import { upsertFrontmatterPdf } from './pairing'
+import { resolvePairedMarkdown, upsertFrontmatterPdf } from './pairing'
 import { PdfSuggestModal } from './pdf-suggest-modal'
 import { CollationSettingTab } from './settings'
 import { type CollationSettings, DEFAULT_SETTINGS } from './types'
@@ -29,6 +29,12 @@ export default class PdfCollationPlugin extends Plugin {
       id: 'bind-pdf-to-note',
       name: '为当前笔记绑定配对 PDF 原件 (Bind PDF to Note)',
       callback: () => {
+        const activeCollation = this.app.workspace.getActiveViewOfType(CollationView)
+        if (activeCollation && activeCollation.getMarkdownFile()) {
+          activeCollation.promptBindPdf()
+          return
+        }
+
         const file = this.app.workspace.getActiveFile()
         if (!file || file.extension.toLowerCase() !== 'md') {
           new Notice('请先打开一篇 Markdown 笔记')
@@ -36,10 +42,20 @@ export default class PdfCollationPlugin extends Plugin {
         }
         new PdfSuggestModal(this.app, async (chosenPdf) => {
           const key = this.settings.frontmatterKeys[0] || 'pdf'
-          await this.app.vault.process(file, (raw) =>
-            upsertFrontmatterPdf(raw, chosenPdf.path, key)
-          )
+          let updatedRaw = ''
+          await this.app.vault.process(file, (raw) => {
+            updatedRaw = upsertFrontmatterPdf(raw, chosenPdf.path, key)
+            return updatedRaw
+          })
           new Notice(`已绑定 ${chosenPdf.name} 到 ${file.name}`)
+          for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_COLLATION)) {
+            if (leaf.view instanceof CollationView) {
+              const viewMd = leaf.view.getMarkdownFile()
+              if (!viewMd || viewMd.path === file.path) {
+                await leaf.view.loadMarkdownFile(file, true, chosenPdf, updatedRaw)
+              }
+            }
+          }
         }).open()
       },
     })
@@ -55,16 +71,51 @@ export default class PdfCollationPlugin extends Plugin {
       },
     })
 
+    this.addCommand({
+      id: 'auto-paginate-from-pdf',
+      name: '根据配对 PDF 自动插入页标 (Auto-paginate Markdown from PDF)',
+      callback: () => {
+        const activeCollation = this.app.workspace.getActiveViewOfType(CollationView)
+        if (activeCollation) {
+          void activeCollation.autoPaginateFromPdf()
+          return
+        }
+        const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_COLLATION)
+        if (leaves.length > 0 && leaves[0].view instanceof CollationView) {
+          this.app.workspace.revealLeaf(leaves[0])
+          void leaves[0].view.autoPaginateFromPdf()
+          return
+        }
+        new Notice('请先在双轨校勘视图中打开一篇配对好 PDF 的笔记')
+      },
+    })
+
     // 文件树右键菜单与编辑器右上角菜单直接打开双轨校勘
     this.registerEvent(
       this.app.workspace.on('file-menu', (menu, file) => {
-        if (file instanceof TFile && file.extension.toLowerCase() === 'md') {
+        if (!(file instanceof TFile)) return
+        const ext = file.extension.toLowerCase()
+        if (ext === 'md') {
           menu.addItem((item) => {
             item
               .setTitle('在双轨校勘视图中打开')
               .setIcon('columns')
               .onClick(() => {
                 void this.openCollationForFile(file)
+              })
+          })
+        } else if (ext === 'pdf') {
+          const pairedMd = resolvePairedMarkdown(this.app, file, this.settings)
+          menu.addItem((item) => {
+            item
+              .setTitle(
+                pairedMd
+                  ? `在双轨校勘视图中打开 (${pairedMd.basename})`
+                  : '在双轨校勘视图中打开 (从 PDF 生成校勘底稿)'
+              )
+              .setIcon('columns')
+              .onClick(() => {
+                void this.openCollationForFile(pairedMd ?? file)
               })
           })
         }
@@ -79,19 +130,69 @@ export default class PdfCollationPlugin extends Plugin {
   }
 
   async openCollationForActiveFile(): Promise<void> {
-    const activeView = this.app.workspace.getActiveViewOfType(CollationView)
-    if (activeView) return
-
+    const activeCollation = this.app.workspace.getActiveViewOfType(CollationView)
     const mdView = this.app.workspace.getActiveViewOfType(MarkdownView)
-    const file = mdView?.file ?? this.app.workspace.getActiveFile()
-    if (!file || file.extension.toLowerCase() !== 'md') {
-      new Notice('请先选中或打开一篇 Markdown 笔记')
+    const activeFile = mdView?.file ?? this.app.workspace.getActiveFile()
+
+    if (activeCollation) {
+      if (activeFile) {
+        const ext = activeFile.extension.toLowerCase()
+        if (ext === 'md' && activeCollation.getMarkdownFile()?.path !== activeFile.path) {
+          await activeCollation.loadMarkdownFile(activeFile, true)
+        } else if (ext === 'pdf') {
+          const pairedMd = resolvePairedMarkdown(this.app, activeFile, this.settings)
+          if (pairedMd) {
+            if (activeCollation.getMarkdownFile()?.path !== pairedMd.path) {
+              await activeCollation.loadMarkdownFile(pairedMd, true)
+            }
+          } else {
+            await activeCollation.loadPdfFileOrGenerateMarkdown(activeFile)
+          }
+        }
+      }
       return
     }
-    await this.openCollationForFile(file)
+
+    if (!activeFile) {
+      new Notice('请先选中或打开一篇 Markdown 笔记或 PDF 文献')
+      return
+    }
+
+    const ext = activeFile.extension.toLowerCase()
+    if (ext === 'md') {
+      await this.openCollationForFile(activeFile)
+      return
+    }
+
+    if (ext === 'pdf') {
+      const pairedMd = resolvePairedMarkdown(this.app, activeFile, this.settings)
+      await this.openCollationForFile(pairedMd ?? activeFile)
+      return
+    }
+
+    new Notice('请先选中或打开一篇 Markdown 笔记或 PDF 文献')
   }
 
   async openCollationForFile(file: TFile): Promise<void> {
+    const existingLeaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_COLLATION)
+    if (existingLeaves.length > 0) {
+      const leaf = existingLeaves[0]
+      await leaf.setViewState({
+        type: VIEW_TYPE_COLLATION,
+        active: true,
+        state: { file: file.path },
+      })
+      if (leaf.view instanceof CollationView) {
+        if (file.extension.toLowerCase() === 'pdf') {
+          await leaf.view.loadPdfFileOrGenerateMarkdown(file)
+        } else {
+          await leaf.view.loadMarkdownFile(file, true)
+        }
+      }
+      this.app.workspace.revealLeaf(leaf)
+      return
+    }
+
     const leaf = this.app.workspace.getLeaf('tab')
     await leaf.setViewState({
       type: VIEW_TYPE_COLLATION,

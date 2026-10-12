@@ -472,6 +472,13 @@
   user-select: text !important;
 }
 
+.pdf-collation-root .textLayer span.markedContent {
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+}
+
 .pdf-collation-root .textLayer ::selection {
   background: rgba(38, 102, 216, 0.42);
 }

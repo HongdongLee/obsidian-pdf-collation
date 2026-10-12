@@ -13,7 +13,7 @@ export class CollationSettingTab extends PluginSettingTab {
     const { containerEl } = this
     containerEl.empty()
 
-    containerEl.createEl('h2', { text: 'PDF Collation (双轨校勘) 设置' })
+    new Setting(containerEl).setName('配对与页标规则 (Pairing & Pagemarks)').setHeading()
 
     new Setting(containerEl)
       .setName('Frontmatter PDF 属性名')

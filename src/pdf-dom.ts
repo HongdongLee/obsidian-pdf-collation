@@ -156,7 +156,11 @@ export function computeSliceHighlightBoxes(
   for (const slice of slices) {
     let measuredFromDom = false
     const span = spans?.[slice.itemIdx]
-    const textNode = span?.firstChild
+    let textNode: Node | null = span?.firstChild ?? null
+    if (textNode && textNode.nodeType !== Node.TEXT_NODE) {
+      const walker = document.createTreeWalker(span!, NodeFilter.SHOW_TEXT)
+      textNode = walker.nextNode()
+    }
     if (
       span &&
       span.isConnected &&

@@ -1,10 +1,11 @@
 import { loadPdfJs } from 'obsidian'
-import { matchPdfTextSlices } from './compare'
+import { matchPdfTextSlices, normalizeText } from './compare'
 import {
   buildTextLayer,
   computeSliceHighlightBoxes,
   createHighlightRectFromBox,
   createPageContainer,
+  isPdfTextItem,
 } from './pdf-dom'
 import type { PdfMatchedSlice, SelectionContext } from './types'
 
@@ -16,6 +17,14 @@ interface PageMeta {
 export interface PdfPaneCallbacks {
   onPageChange: (page: number, totalPages: number) => void
   onPdfSelect: (selectedText: string, page: number, context: SelectionContext) => void
+}
+
+export interface HighlightOptions extends SelectionContext {
+  /**
+   * 当 Markdown 笔记存在明确页标时设为 true：
+   * 仅在指定页（及首尾跨页断句时的相邻页）内查找，绝不跳转到全书其它页码
+   */
+  strictPage?: boolean
 }
 
 export interface HighlightResult {
@@ -35,13 +44,18 @@ export class PdfPaneController {
 
   private pdfjs: any = null
   private doc: any = null
+  private loadSeq = 0
+  private currentResourceUrl = ''
   private baseMeta: PageMeta = { w: 612, h: 792 }
   private scale = 1
   private zoomFactor = 1
   private pageSizes: PageMeta[] = []
   private containers = new Map<number, HTMLDivElement>()
-  private rendered = new Map<number, { renderTask?: any; textLayerTask?: any }>()
-  private rendering = new Set<number>()
+  private rendered = new Map<
+    number,
+    { cancelled?: boolean; renderTask?: any; textLayerTask?: any }
+  >()
+  private rendering = new Map<number, Promise<void>>()
   private textContentCache = new Map<number, any>()
   private itemsCache = new Map<number, readonly unknown[]>()
   private pageSpans = new Map<number, readonly (HTMLElement | null)[]>()
@@ -93,12 +107,32 @@ export class PdfPaneController {
     return Math.round(this.zoomFactor * 100)
   }
 
+  get loadedResourceUrl(): string {
+    return this.currentResourceUrl
+  }
+
   containsNode(node: Node | null): boolean {
     return !!node && this.paneEl.contains(node)
   }
 
-  async load(resourceUrl: string): Promise<void> {
+  clear(message = '未找到配对的 PDF 原件，点击顶部「绑定 PDF」可手动关联'): void {
+    ++this.loadSeq
+    this.currentResourceUrl = ''
     this.cleanupDoc()
+    this.innerEl.replaceChildren()
+    this.paneEl.scrollTop = 0
+    this.badgeEl.style.display = 'none'
+    this.statusEl.className = 'pdf-status'
+    this.statusEl.textContent = message
+    this.statusEl.style.display = 'block'
+  }
+
+  async load(resourceUrl: string): Promise<void> {
+    const seq = ++this.loadSeq
+    this.currentResourceUrl = resourceUrl
+    this.cleanupDoc()
+    this.innerEl.replaceChildren()
+    this.paneEl.scrollTop = 0
     this.statusEl.className = 'pdf-status'
     this.statusEl.textContent = 'PDF 载入中…'
     this.statusEl.style.display = 'block'
@@ -106,7 +140,7 @@ export class PdfPaneController {
 
     try {
       const pdfjs: any = await loadPdfJs()
-      if (this.destroyed) return
+      if (this.destroyed || seq !== this.loadSeq) return
       this.pdfjs = pdfjs
 
       if (pdfjs.GlobalWorkerOptions && !pdfjs.GlobalWorkerOptions.workerSrc) {
@@ -124,7 +158,7 @@ export class PdfPaneController {
         isEvalSupported: false,
       })
       const doc = await loadingTask.promise
-      if (this.destroyed) {
+      if (this.destroyed || seq !== this.loadSeq) {
         doc.destroy?.()
         return
       }
@@ -132,29 +166,50 @@ export class PdfPaneController {
       this.doc = doc
       this.numPages = doc.numPages
       const page1 = await doc.getPage(1)
+      const page2 = doc.numPages >= 2 ? await doc.getPage(2) : null
+      if (this.destroyed || seq !== this.loadSeq) {
+        doc.destroy?.()
+        return
+      }
       const vp1 = page1.getViewport({ scale: 1 })
-      this.baseMeta = { w: vp1.width, h: vp1.height }
-      this.computeScale()
-      this.pageSizes = Array.from({ length: doc.numPages }, () => ({
-        w: vp1.width,
-        h: vp1.height,
-      }))
+      const vp2 = page2 ? page2.getViewport({ scale: 1 }) : vp1
+      this.baseMeta = { w: Math.max(vp1.width, vp2.width), h: vp2.height }
+      this.pageSizes = Array.from({ length: doc.numPages }, (_, idx) =>
+        idx === 0
+          ? { w: vp1.width, h: vp1.height }
+          : { w: vp2.width, h: vp2.height }
+      )
 
+      for (const n of Array.from(this.rendered.keys())) this.clearPageDom(n)
+      for (const n of Array.from(this.rendering.keys())) this.clearPageDom(n)
       this.innerEl.replaceChildren()
       this.containers.clear()
       for (let i = 1; i <= doc.numPages; i++) {
         const c = createPageContainer(i)
         this.innerEl.append(c)
         this.containers.set(i, c)
-        this.layoutPage(i)
       }
 
+      this.paneEl.scrollTop = 0
       this.statusEl.style.display = 'none'
       this.badgeEl.style.display = 'block'
+
+      // 先布局一次撑开滚动高度，若纵向滚动条出现导致 clientWidth 变化则立即二次收敛缩放，避免首屏刚启动渲染就被 ensureScale 打断
+      const initialScale = this.computeScale()
+      for (let i = 1; i <= doc.numPages; i++) {
+        this.layoutPage(i)
+      }
+      if (Math.abs(this.computeScale() - initialScale) >= 0.005) {
+        for (let i = 1; i <= doc.numPages; i++) {
+          this.layoutPage(i)
+        }
+      }
+
       this.setupResizeObserver()
       this.updateVisible()
     } catch (e: any) {
-      if (this.destroyed) return
+      if (this.destroyed || seq !== this.loadSeq) return
+      this.currentResourceUrl = ''
       this.statusEl.className = 'pdf-status pdf-err'
       this.statusEl.textContent = `PDF 载入失败 (${e?.message || String(e)})`
       this.statusEl.style.display = 'block'
@@ -196,42 +251,68 @@ export class PdfPaneController {
     }
   }
 
+  private isPageVisibleInViewport(pageNumber: number): boolean {
+    const c = this.containers.get(pageNumber)
+    if (!c) return false
+    const viewTop = this.paneEl.scrollTop
+    const viewBottom = viewTop + this.paneEl.clientHeight
+    const pageTop = c.offsetTop
+    const pageBottom = pageTop + c.offsetHeight
+    return pageBottom > viewTop + 48 && pageTop < viewBottom - 48
+  }
+
   /**
-   * 在目标页（优先当前对应页及相邻页，未命中时自动检索全篇）查找并高亮精确字符区间
+   * 在目标页查找并高亮精确字符区间。
+   * 当 strictPage 为 true（笔记含明确页标）时严格锁定在当前对应页（仅当本页无完整命中时才检查相邻页），绝不跨全书乱跳
    */
   async highlightOnPage(
     preferredPage: number,
     text: string,
-    context?: SelectionContext
+    options?: HighlightOptions
   ): Promise<HighlightResult> {
     if (!this.doc || this.numPages < 1) return { page: preferredPage, count: 0 }
 
     const clampedPref = Math.max(1, Math.min(preferredPage || 1, this.numPages))
-    const priorityPages: number[] = [clampedPref]
-    if (clampedPref + 1 <= this.numPages) priorityPages.push(clampedPref + 1)
-    if (clampedPref - 1 >= 1) priorityPages.push(clampedPref - 1)
+    const strictPage = options?.strictPage ?? false
 
     let bestHit: { page: number; slices: PdfMatchedSlice[]; score: number } | null = null
 
-    for (const p of priorityPages) {
-      const items = await this.getPageItems(p)
-      const matched = matchPdfTextSlices(items, text, context)
-      if (!matched || matched.slices.length === 0) continue
-      const pageBonus = p === clampedPref ? 15 : 0
-      const totalScore = matched.score + pageBonus
-      if (!bestHit || totalScore > bestHit.score) {
-        bestHit = { page: p, slices: matched.slices, score: totalScore }
+    const prefItems = await this.getPageItems(clampedPref)
+    const prefMatched = matchPdfTextSlices(prefItems, text, options)
+    if (prefMatched && prefMatched.slices.length > 0) {
+      bestHit = {
+        page: clampedPref,
+        slices: prefMatched.slices,
+        score: prefMatched.score + 150,
       }
     }
 
-    // 若优先页及相邻页未找到，检索全篇其余页
-    if (!bestHit) {
-      const visited = new Set(priorityPages)
+    // 仅当优先页未命中（或仅命中残缺断句 score < 500）时，才探测紧邻的前后各一页（处理跨页断句）
+    if (!bestHit || bestHit.score < 650) {
+      const neighborPages: number[] = []
+      if (clampedPref + 1 <= this.numPages) neighborPages.push(clampedPref + 1)
+      if (clampedPref - 1 >= 1) neighborPages.push(clampedPref - 1)
+
+      for (const p of neighborPages) {
+        const items = await this.getPageItems(p)
+        const matched = matchPdfTextSlices(items, text, options)
+        if (!matched || matched.slices.length === 0) continue
+        // 在严格页码模式下，相邻页必须具备高置信度（精确命中或强上下文夹逼）才允许采纳
+        if (strictPage && matched.score < 850) continue
+        if (!bestHit || matched.score > bestHit.score) {
+          bestHit = { page: p, slices: matched.slices, score: matched.score }
+        }
+      }
+    }
+
+    // 仅在无页标文档（!strictPage）且当前页及相邻页均未命中时，才检索全篇其余页的高置信精确匹配
+    if (!bestHit && !strictPage) {
+      const visited = new Set([clampedPref, clampedPref - 1, clampedPref + 1])
       for (let p = 1; p <= this.numPages; p++) {
         if (visited.has(p)) continue
         const items = await this.getPageItems(p)
-        const matched = matchPdfTextSlices(items, text, context)
-        if (!matched || matched.slices.length === 0) continue
+        const matched = matchPdfTextSlices(items, text, options)
+        if (!matched || matched.slices.length === 0 || matched.score < 950) continue
         if (!bestHit || matched.score > bestHit.score) {
           bestHit = { page: p, slices: matched.slices, score: matched.score }
         }
@@ -239,20 +320,62 @@ export class PdfPaneController {
     }
 
     if (!bestHit) {
-      this.scrollToPage(clampedPref, true)
+      this.clearHighlight()
+      if (!this.isPageVisibleInViewport(clampedPref)) {
+        this.scrollToPage(clampedPref, true)
+      }
       return { page: clampedPref, count: 0 }
     }
 
     const { page: targetPage, slices } = bestHit
     this.activeHighlight = { page: targetPage, slices }
 
-    if (targetPage !== this.curPage) {
-      this.scrollToPage(targetPage)
-    }
     await this.renderPage(targetPage)
     await this.drawHighlightOnRenderedPage(targetPage, slices, true)
 
     return { page: targetPage, count: slices.length }
+  }
+
+  private extractDirectPdfSelectionSlices(
+    page: number,
+    range: Range,
+    items: readonly unknown[]
+  ): PdfMatchedSlice[] | null {
+    const spans = this.pageSpans.get(page)
+    if (!spans || spans.length === 0) return null
+
+    const slices: PdfMatchedSlice[] = []
+    for (let idx = 0; idx < spans.length; idx++) {
+      const span = spans[idx]
+      const item = items[idx]
+      if (!span || !span.isConnected || !isPdfTextItem(item) || !item.str) continue
+      if (!range.intersectsNode(span)) continue
+
+      const textNode = span.firstChild
+      const len = item.str.length
+      let startOffset = 0
+      let endOffset = len
+
+      if (textNode) {
+        if (range.startContainer === textNode || range.startContainer === span) {
+          startOffset = Math.max(0, Math.min(len, range.startOffset))
+        }
+        if (range.endContainer === textNode || range.endContainer === span) {
+          endOffset = Math.max(startOffset, Math.min(len, range.endOffset))
+        }
+      }
+
+      if (endOffset > startOffset) {
+        slices.push({
+          itemIdx: idx,
+          item,
+          startOffset,
+          endOffset,
+        })
+      }
+    }
+
+    return slices.length > 0 ? slices : null
   }
 
   /**
@@ -268,38 +391,65 @@ export class PdfPaneController {
     const text = sel.toString().trim()
     if (text.length < 1) return false
 
-    const pageEl = el0.closest('.pdf-page-c') as HTMLElement | null
+    const startNode = range.startContainer
+    const startEl =
+      startNode.nodeType === 3 ? startNode.parentElement : (startNode as HTMLElement)
+    const endNode = range.endContainer
+    const endEl = endNode.nodeType === 3 ? endNode.parentElement : (endNode as HTMLElement)
+
+    const pageEl =
+      (startEl?.closest('.pdf-page-c') as HTMLElement | null) ??
+      (endEl?.closest('.pdf-page-c') as HTMLElement | null) ??
+      (el0.closest('.pdf-page-c') as HTMLElement | null)
     const page = Number(pageEl?.dataset.page) || this.curPage || 1
     const textLayerEl = pageEl?.querySelector('.textLayer') as HTMLElement | null
 
     let before = ''
     let after = ''
+    let progress: number | undefined
     if (textLayerEl) {
       try {
         const preRange = document.createRange()
         preRange.selectNodeContents(textLayerEl)
         preRange.setEnd(range.startContainer, range.startOffset)
-        before = preRange.toString().slice(-60)
+        const rawBefore = preRange.toString()
+        before = rawBefore.slice(-80)
 
         const postRange = document.createRange()
         postRange.selectNodeContents(textLayerEl)
         postRange.setStart(range.endContainer, range.endOffset)
-        after = postRange.toString().slice(0, 60)
+        const rawAfter = postRange.toString()
+        after = rawAfter.slice(0, 80)
+
+        const bLen = normalizeText(rawBefore).length
+        const sLen = normalizeText(text).length
+        const aLen = normalizeText(rawAfter).length
+        const total = bLen + sLen + aLen
+        if (total > 0) {
+          progress = bLen / total
+        }
       } catch {
         // ignore range boundary errors
       }
     }
 
-    // 在 PDF 当前页同步绘制持久黄框，使左右两栏同时呈现清晰的对位高亮
+    const directRange = range.cloneRange()
+    // 在 PDF 当前页同步绘制持久黄框，优先直接读取 DOM 选区对应的 textLayer 切片，避免同页同词误判
     void this.getPageItems(page).then(async (items) => {
-      const matched = matchPdfTextSlices(items, text, { before, after })
+      const directSlices = this.extractDirectPdfSelectionSlices(page, directRange, items)
+      if (directSlices && directSlices.length > 0) {
+        this.activeHighlight = { page, slices: directSlices }
+        await this.drawHighlightOnRenderedPage(page, directSlices, false)
+        return
+      }
+      const matched = matchPdfTextSlices(items, text, { before, after, progress })
       if (matched && matched.slices.length > 0) {
         this.activeHighlight = { page, slices: matched.slices }
         await this.drawHighlightOnRenderedPage(page, matched.slices, false)
       }
     })
 
-    this.callbacks.onPdfSelect(text, page, { before, after })
+    this.callbacks.onPdfSelect(text, page, { before, after, progress })
     return true
   }
 
@@ -332,15 +482,28 @@ export class PdfPaneController {
     const wrap = document.createElement('div')
     wrap.className = 'pdf-hl-wrap'
     let minTop = Infinity
+    let maxBottom = -Infinity
     for (const box of boxes) {
       if (box.top < minTop) minTop = box.top
+      if (box.top + box.height > maxBottom) maxBottom = box.top + box.height
       wrap.append(createHighlightRectFromBox(box))
     }
     c.append(wrap)
 
     if (scrollIntoCenter && Number.isFinite(minTop)) {
-      const targetScroll = Math.max(0, c.offsetTop + minTop - this.paneEl.clientHeight * 0.35)
-      this.paneEl.scrollTo({ top: targetScroll, behavior: 'smooth' })
+      const hlTop = c.offsetTop + minTop
+      const hlBottom = c.offsetTop + (Number.isFinite(maxBottom) ? maxBottom : minTop + 24)
+      const viewTop = this.paneEl.scrollTop
+      const viewHeight = this.paneEl.clientHeight
+      const viewBottom = viewTop + viewHeight
+      const margin = Math.min(72, viewHeight * 0.14)
+
+      const alreadyVisible = hlTop >= viewTop + margin && hlBottom <= viewBottom - margin
+      if (!alreadyVisible) {
+        const targetScroll = Math.max(0, hlTop - viewHeight * 0.32)
+        this.paneEl.scrollTo({ top: targetScroll, behavior: 'smooth' })
+      }
+      this.scheduleUpdate()
     }
   }
 
@@ -379,7 +542,8 @@ export class PdfPaneController {
   }
 
   private computeScale(): number {
-    const width = this.paneEl.clientWidth || 600
+    const rawWidth = this.paneEl.clientWidth
+    const width = rawWidth > 0 ? rawWidth : 600
     const fit = Math.max(0.35, Math.min(3, (width - 24) / (this.baseMeta.w || 612)))
     this.scale = fit * this.zoomFactor
     return this.scale
@@ -392,12 +556,13 @@ export class PdfPaneController {
 
   private ensureScale(): boolean {
     if (!this.baseMeta.w) return false
+    if (this.paneEl.clientWidth <= 0 && this.scale > 0) return false
     const prev = this.scale
     const next = this.computeScale()
     if (Math.abs(next - prev) < 0.01) return false
 
     for (const n of Array.from(this.rendered.keys())) this.clearPageDom(n)
-    for (const n of Array.from(this.rendering)) this.clearPageDom(n)
+    for (const n of Array.from(this.rendering.keys())) this.clearPageDom(n)
     for (const [n] of this.containers) this.layoutPage(n)
     this.curPage = 0
     return true
@@ -417,34 +582,73 @@ export class PdfPaneController {
 
   private clearPageDom(n: number): void {
     const c = this.containers.get(n)
-    if (!c) return
     const r = this.rendered.get(n)
-    const hadTask = !!r?.renderTask
-    try {
-      r?.renderTask?.cancel?.()
-      r?.textLayerTask?.cancel?.()
-    } catch {
-      // ignore
+    const hadTask = !!r && !r.cancelled
+    if (r) {
+      r.cancelled = true
+      try {
+        r.renderTask?.cancel?.()
+        r.textLayerTask?.cancel?.()
+      } catch {
+        // ignore
+      }
     }
     this.rendered.delete(n)
+    this.rendering.delete(n)
     this.pageSpans.delete(n)
-    for (const child of Array.from(c.querySelectorAll('canvas, .textLayer, .pdf-hl-wrap'))) {
-      child.remove()
+    if (c) {
+      for (const child of Array.from(c.querySelectorAll('canvas, .textLayer, .pdf-hl-wrap'))) {
+        child.remove()
+      }
     }
     if (hadTask && !this.destroyed) this.scheduleUpdate()
   }
 
-  private async renderPage(n: number): Promise<void> {
-    if (!this.doc || n < 1 || n > this.numPages) return
-    if (this.rendering.has(n) || this.rendered.has(n)) return
-    this.rendering.add(n)
+  private renderPage(n: number): Promise<void> {
+    if (!this.doc || n < 1 || n > this.numPages) return Promise.resolve()
+    const inFlight = this.rendering.get(n)
+    if (inFlight) return inFlight
+    if (this.rendered.has(n)) {
+      const c = this.containers.get(n)
+      const cv = c?.querySelector('canvas')
+      if (cv && cv.width > 0 && cv.height > 0) {
+        return Promise.resolve()
+      }
+      this.clearPageDom(n)
+    }
+
+    const entry: { cancelled?: boolean; renderTask?: any; textLayerTask?: any } = {
+      cancelled: false,
+    }
+    this.rendered.set(n, entry)
+
+    const promise = this.doRenderPage(n, entry).finally(() => {
+      if (this.rendering.get(n) === promise) {
+        this.rendering.delete(n)
+      }
+    })
+    this.rendering.set(n, promise)
+    return promise
+  }
+
+  private async doRenderPage(
+    n: number,
+    entry: { cancelled?: boolean; renderTask?: any; textLayerTask?: any }
+  ): Promise<void> {
+    const doc = this.doc
+    if (!doc) return
+    const isStale = () =>
+      this.destroyed || this.doc !== doc || !!entry.cancelled || this.rendered.get(n) !== entry
 
     try {
-      const page = await this.doc.getPage(n)
+      const page = await doc.getPage(n)
+      if (isStale()) return
+
       const vp1 = page.getViewport({ scale: 1 })
+      const curMeta = this.pageSizes[n - 1] ?? this.baseMeta
       if (
-        Math.abs(vp1.width - this.baseMeta.w) > 2 ||
-        Math.abs(vp1.height - this.baseMeta.h) > 2
+        Math.abs(vp1.width - curMeta.w) > 2 ||
+        Math.abs(vp1.height - curMeta.h) > 2
       ) {
         this.pageSizes[n - 1] = { w: vp1.width, h: vp1.height }
         this.layoutPage(n, this.pageSizes[n - 1])
@@ -452,6 +656,10 @@ export class PdfPaneController {
 
       const c = this.containers.get(n)
       if (!c) return
+      for (const old of Array.from(c.querySelectorAll('canvas, .textLayer'))) {
+        old.remove()
+      }
+
       const scale = this.scale
       const dpr = Math.min(window.devicePixelRatio || 1, 2)
       const vp = page.getViewport({ scale: scale * dpr })
@@ -467,11 +675,13 @@ export class PdfPaneController {
         canvasContext: canvas.getContext('2d')!,
         viewport: vp,
       })
-      const entry: { renderTask?: any; textLayerTask?: any } = { renderTask }
-      this.rendered.set(n, entry)
+      entry.renderTask = renderTask
       await renderTask.promise
+      if (isStale()) return
 
       const tc = await this.getPageTextContent(n)
+      if (isStale()) return
+
       const tl = document.createElement('div')
       tl.className = 'textLayer'
       c.append(tl)
@@ -485,6 +695,7 @@ export class PdfPaneController {
         })
         entry.textLayerTask = tlInstance
         await tlInstance.render()
+        if (isStale()) return
         const tlItems = (tlInstance.textContentItems as readonly unknown[]) || []
         const tlDivs = (tlInstance.textDivs as readonly HTMLElement[]) || []
         if (tlItems.length > 0) {
@@ -502,6 +713,16 @@ export class PdfPaneController {
         await this.drawHighlightOnRenderedPage(n, this.activeHighlight.slices, false)
       }
     } catch (e: any) {
+      if (this.rendered.get(n) === entry) {
+        this.rendered.delete(n)
+        this.pageSpans.delete(n)
+        const c = this.containers.get(n)
+        if (c) {
+          for (const child of Array.from(c.querySelectorAll('canvas, .textLayer'))) {
+            child.remove()
+          }
+        }
+      }
       if (
         e?.name !== 'RenderingCancelledException' &&
         e?.name !== 'AbortException' &&
@@ -509,8 +730,6 @@ export class PdfPaneController {
       ) {
         console.warn(`PDF 第 ${n} 页渲染异常`, e)
       }
-    } finally {
-      this.rendering.delete(n)
     }
   }
 
@@ -532,6 +751,30 @@ export class PdfPaneController {
     if (cached) return cached
     await this.getPageTextContent(n)
     return this.itemsCache.get(n) || []
+  }
+
+  async extractAllPageItems(): Promise<(readonly unknown[])[]> {
+    if (!this.doc || this.numPages < 1) return []
+    const pages: (readonly unknown[])[] = []
+    for (let p = 1; p <= this.numPages; p++) {
+      const items = await this.getPageItems(p)
+      pages.push(items)
+    }
+    return pages
+  }
+
+  async extractAllPageTexts(): Promise<string[]> {
+    if (!this.doc || this.numPages < 1) return []
+    const texts: string[] = []
+    for (let p = 1; p <= this.numPages; p++) {
+      const items = await this.getPageItems(p)
+      const pageStr = items
+        .filter(isPdfTextItem)
+        .map((it) => it.str)
+        .join(' ')
+      texts.push(pageStr)
+    }
+    return texts
   }
 
   private currentPageFromScroll(): number {
