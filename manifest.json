@@ -1,7 +1,7 @@
 {
   "id": "pdf-collation",
   "name": "PDF Collation",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.13.7",
   "description": "Compare Markdown notes with PDFs side by side, synchronize text selections and pages, generate paginated drafts, and edit page blocks inline.",
   "author": "lihaodong",

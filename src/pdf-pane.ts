@@ -87,7 +87,7 @@ export class PdfPaneController {
 
     this.badgeEl = document.createElement('div')
     this.badgeEl.className = 'pdf-badge'
-    this.badgeEl.style.display = 'none'
+    this.badgeEl.classList.add('cmp-hidden')
     this.wrapEl.append(this.paneEl, this.badgeEl)
 
     parentEl.append(this.wrapEl)
@@ -121,10 +121,10 @@ export class PdfPaneController {
     this.cleanupDoc()
     this.innerEl.replaceChildren()
     this.paneEl.scrollTop = 0
-    this.badgeEl.style.display = 'none'
+    this.badgeEl.classList.add('cmp-hidden')
     this.statusEl.className = 'pdf-status'
     this.statusEl.textContent = message
-    this.statusEl.style.display = 'block'
+    this.statusEl.classList.remove('cmp-hidden')
   }
 
   async load(resourceUrl: string): Promise<void> {
@@ -135,8 +135,8 @@ export class PdfPaneController {
     this.paneEl.scrollTop = 0
     this.statusEl.className = 'pdf-status'
     this.statusEl.textContent = 'PDF 载入中…'
-    this.statusEl.style.display = 'block'
-    this.badgeEl.style.display = 'none'
+    this.statusEl.classList.remove('cmp-hidden')
+    this.badgeEl.classList.add('cmp-hidden')
 
     try {
       const pdfjs: any = await loadPdfJs()
@@ -191,8 +191,8 @@ export class PdfPaneController {
       }
 
       this.paneEl.scrollTop = 0
-      this.statusEl.style.display = 'none'
-      this.badgeEl.style.display = 'block'
+      this.statusEl.classList.add('cmp-hidden')
+      this.badgeEl.classList.remove('cmp-hidden')
 
       // 先布局一次撑开滚动高度，若纵向滚动条出现导致 clientWidth 变化则立即二次收敛缩放，避免首屏刚启动渲染就被 ensureScale 打断
       const initialScale = this.computeScale()
@@ -212,7 +212,7 @@ export class PdfPaneController {
       this.currentResourceUrl = ''
       this.statusEl.className = 'pdf-status pdf-err'
       this.statusEl.textContent = `PDF 载入失败 (${e?.message || String(e)})`
-      this.statusEl.style.display = 'block'
+      this.statusEl.classList.remove('cmp-hidden')
     }
   }
 
@@ -576,8 +576,6 @@ export class PdfPaneController {
     c.style.height = `${Math.round(m.h * this.scale)}px`
     c.style.setProperty('--scale-factor', String(this.scale))
     c.style.setProperty('--total-scale-factor', String(this.scale))
-    c.style.setProperty('--scale-round-x', '1px')
-    c.style.setProperty('--scale-round-y', '1px')
   }
 
   private clearPageDom(n: number): void {

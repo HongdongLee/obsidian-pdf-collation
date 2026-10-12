@@ -1,6 +1,7 @@
 import js from '@eslint/js'
 import globals from 'globals'
 import tseslint from 'typescript-eslint'
+import obsidianmd from 'eslint-plugin-obsidianmd'
 
 export default tseslint.config(
   { ignores: ['main.js', 'node_modules'] },
@@ -17,6 +18,19 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+    },
+  },
+  {
+    files: ['src/**/*.ts'],
+    plugins: { obsidianmd },
+    languageOptions: {
+      parserOptions: { projectService: true },
+    },
+    rules: {
+      ...obsidianmd.ruleConfigs.recommended,
+      ...obsidianmd.ruleConfigs.recommendedTypeChecked,
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
     },
   }
 )

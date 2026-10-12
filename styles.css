@@ -396,6 +396,8 @@
 }
 
 .pdf-collation-root .pdf-page-c {
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
   position: relative;
   margin: 0 auto 12px;
   background: #fff;
@@ -508,3 +510,12 @@
   }
 }
 
+
+/* Fixed styles live in CSS; page geometry remains computed at runtime. */
+.pdf-collation-root .textLayerNode {
+  font-family: serif;
+}
+
+.pdf-collation-root .cmp-hidden {
+  display: none;
+}

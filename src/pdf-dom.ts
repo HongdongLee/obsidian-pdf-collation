@@ -56,7 +56,6 @@ export function buildTextLayer(
     span.style.left = `${x}px`
     span.style.top = `${y - height * 0.85}px`
     span.style.fontSize = `${height}px`
-    span.style.fontFamily = 'serif'
     frag.append(span)
     pairs.push({ span, width })
     spansByItem.push(span)

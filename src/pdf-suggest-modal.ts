@@ -1,9 +1,11 @@
-import { type App, FuzzySuggestModal, type TFile } from 'obsidian'
+import { type App, FuzzySuggestModal, Notice, type TFile } from 'obsidian'
+
+type PdfChoiceCallback = (file: TFile) => void | Promise<void>
 
 export class PdfSuggestModal extends FuzzySuggestModal<TFile> {
-  private onChooseCallback: (file: TFile) => void
+  private onChooseCallback: PdfChoiceCallback
 
-  constructor(app: App, onChooseCallback: (file: TFile) => void) {
+  constructor(app: App, onChooseCallback: PdfChoiceCallback) {
     super(app)
     this.onChooseCallback = onChooseCallback
     this.setPlaceholder('输入关键字搜索库内的 PDF 文件进行绑定…')
@@ -21,6 +23,11 @@ export class PdfSuggestModal extends FuzzySuggestModal<TFile> {
   }
 
   onChooseItem(item: TFile): void {
-    this.onChooseCallback(item)
+    void Promise.resolve()
+      .then(() => this.onChooseCallback(item))
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        new Notice(`绑定 PDF 失败：${message}`)
+      })
   }
 }
