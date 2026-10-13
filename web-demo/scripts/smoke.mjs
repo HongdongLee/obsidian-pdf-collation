@@ -42,7 +42,7 @@ try {
       .locator(".workbench")
       .evaluate((el) => el.clientHeight > window.innerHeight * 0.8),
   );
-  assert.equal(await page.locator(".pdf-page-section").count(), 3);
+  assert.equal(await page.locator(".pdf-page-section").count(), 12);
   assert.ok(
     (await page.locator(".pdf-highlight-box").count()) > 0,
     "Default PDF highlight",
@@ -64,12 +64,12 @@ try {
   assert.ok((await page.locator(".hit-source.pdf").count()) > 0);
   await page.screenshot({ path: "docs/search.png", fullPage: true });
 
-  await field.fill("PDF 保留了版面");
+  await field.fill("只有把出处放在眼前");
   await page.waitForTimeout(260);
   assert.equal(
     await page.locator(".search-hit").count(),
     2,
-    "Punctuation-tolerant bilingual search",
+    "Bidirectional search in the twelve-page sample",
   );
   await page.locator(".search-hit").last().click();
   await page.waitForTimeout(300);
@@ -120,6 +120,18 @@ try {
     0,
     "Keyboard navigation must select a result",
   );
+
+  // Real long-range collation: selecting a Markdown paragraph from page 11
+  // must jump to the matching PDF page, without navigating with page buttons.
+  const longRangeTarget = page.locator('[data-page="11"] .md-prose p').first();
+  await longRangeTarget.scrollIntoViewIfNeeded();
+  await longRangeTarget.click();
+  await page.waitForTimeout(500);
+  assert.equal(await page.locator(".page-current").innerText(), "11");
+  assert.ok((await page.locator(".pdf-highlight-box").count()) > 0);
+  // Reset to the first page before testing the existing tutorial and scrolling.
+  await page.locator('[data-page="1"] .md-prose p').first().click();
+  await page.waitForTimeout(240);
 
   // Exactly one permanent tutorial entry: More > Tutorial.
   await page.getByRole("button", { name: "更多操作" }).click();

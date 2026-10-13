@@ -16,7 +16,7 @@ npm install
 npm run dev
 ```
 
-打开终端给出的本地地址（通常为 `http://127.0.0.1:5173/`）。页面会自动加载三页示例 PDF 和对应的 Markdown，不需要上传文件。
+打开终端给出的本地地址（通常为 `http://127.0.0.1:5173/`）。页面会自动加载十二页示例 PDF 和对应的 Markdown，不需要上传文件。
 
 ## 使用
 
@@ -56,3 +56,7 @@ npm run test:e2e
 `.github/workflows/pages.yml` 在 `main` 分支的演示源码或共享匹配代码更新时自动安装依赖、构建并部署 `web-demo/dist`，也支持手动运行。Vite 使用相对资源路径，适配 GitHub Pages 的项目子目录。
 
 示例 PDF 为项目内原创演示文本，位于 `public/sample.pdf`。
+
+## Default long-form example
+
+The browser demo now opens with a **12-page original sample PDF** and its matching paginated Markdown. Select text or scroll either pane to explore long-range collation; you can still import your own documents. The sample is original demonstration content, not a published academic work.

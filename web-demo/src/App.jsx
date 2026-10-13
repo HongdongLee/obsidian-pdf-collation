@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import SEED_MD from "./sample.md?raw";
 import ReactMarkdown from "react-markdown";
 import { buildSearchDocuments, searchDocuments } from "./search.js";
 import remarkGfm from "remark-gfm";
@@ -57,44 +58,6 @@ import {
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 const REPO_URL = "https://github.com/HongdongLee/obsidian-pdf-collation";
-const SEED_MD = [
-  "---",
-  'pdf: "[[sample.pdf]]"',
-  "---",
-  "",
-  "[pdf. 1]",
-  "",
-  "# 重返文本：数字时代的文献校勘",
-  "### 从纸本文献到可验证的数字版本",
-  "",
-  "所谓校勘，并非追求一个脱离历史的“完美文本”，而是对不同版本之间的差异进行辨析，并尽可能恢复它们的传承关系。",
-  "",
-  "当纸本被转换为可检索的数字文本后，研究者面对的，不再只有纸张上的字形，也包括 OCR 识别、断行、标点与分页带来的二次误差。",
-  "",
-  "因此，我们需要在原件与整理稿之间建立稳定的证据链：每一个判断都应当能够返回原始页面，每一次订正都应当保留上下文。［校按：此处的“证据链”并非技术术语，而是学术方法上的可复核性。］",
-  "",
-  "[pdf. 2]",
-  "",
-  "## 一、双轨对照的必要性",
-  "",
-  "PDF 保留了版面、页码与视觉证据，Markdown 则提供了自由检索、批注和版本控制的便利。两种媒介相互补充，却不应互相取代。",
-  "",
-  "如果脱离 PDF 单独编辑 Markdown，细微的 OCR 误字可能被进一步传播；如果仅在 PDF 上批注，笔记又容易失去结构化重用的可能。",
-  "",
-  "理想的工具应当让研究者在两种文本之间自由往返，同时允许不确定性暂时保留。[^note]",
-  "",
-  "[pdf. 3]",
-  "",
-  "## 二、从对齐到解释",
-  "",
-  "跨页断句、异体字、脚注和人工按语，都可能导致简单的字符串检索失败。一个可用的对勘系统，应容忍局部噪声，并综合上下文推断对应位置。",
-  "",
-  "当研究者选择 Markdown 中的一段文字，系统应快速定位原件，并突出显示可能对应的字词；反向选择也同样成立。",
-  "",
-  "技术的作用不是替代研究者作出判断，而是缩短从疑问返回证据的路径。",
-  "",
-  "[^note]: 演示脚注：校勘判断仍需人工核验。",
-].join("\n");
 
 const safeName = (name, fallback) =>
   (name || fallback).replace(/[^\w\-.\u4e00-\u9fff\s]/g, "_");
@@ -542,7 +505,7 @@ export default function App() {
       if (mdImportRevision.current === mdRevisionAtStart) {
         setMdName(
           demo
-            ? "重返文本.md"
+            ? "研究札记.md"
             : safeName(filename.replace(/\.pdf$/i, ""), "校勘底稿") + ".md",
         );
         setMarkdown(
@@ -563,7 +526,7 @@ export default function App() {
           : "浏览器本地处理 · 无需上传",
       );
       if (demo) {
-        const excerpt = "所谓校勘，并非追求一个脱离历史的";
+        const excerpt = "面对同一部作品，研究者往往有 PDF 原件";
         const initial = matchPdfTextSlices(pagesItems[0] || [], excerpt);
         if (initial && initial.score >= 500) {
           setHighlight({
