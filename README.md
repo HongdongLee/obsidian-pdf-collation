@@ -6,6 +6,24 @@ Side-by-side Markdown & PDF collation plugin for Obsidian. Features zero-config 
 
 ---
 
+## Web Demo / 浏览器体验版
+
+一个无需安装 Obsidian 的本地优先体验站：可双栏阅读 PDF 与 Markdown、双向划选定位、生成校勘底稿、自动分页和下载改订稿。默认含三页示例文献，也支持本地导入自己的文件。
+
+[**在线体验 Collatio Web Demo**](https://hongdonglee.github.io/obsidian-pdf-collation/)
+
+![PDF Collation Web Demo](web-demo/docs/desktop.png)
+
+```bash
+cd web-demo
+npm install
+npm run dev
+```
+
+更多说明请见 [Web Demo README](web-demo/README.md)。演示通过 GitHub Pages 提供访问，文献在浏览器本地处理，不会上传文件或修改 Obsidian Vault。
+
+---
+
 ## 30 秒零配置上手
 
 甚至不需要提前准备 `.md` 文件，也不需要手写 YAML 路径、手动打页标或预先清洗 OCR 错字。
