@@ -1,8 +1,16 @@
-# Obsidian PDF Collation (双轨校勘)
+# PDF Collation · Obsidian 双轨校勘
 
-将 Markdown 笔记与 PDF 原件并排对照的 Obsidian 插件。无论你手头只有一份刚下载的 `.pdf`，还是用 MinerU、Marker、Doc2X 跑完 OCR 的粗稿，或是正在做逐页引文核查与古籍校勘，都能直接上手。
+[![Release](https://img.shields.io/github/v/release/HongdongLee/obsidian-pdf-collation?label=release)](https://github.com/HongdongLee/obsidian-pdf-collation/releases/latest)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/HongdongLee/obsidian-pdf-collation?style=social)](https://github.com/HongdongLee/obsidian-pdf-collation/stargazers)
 
-Side-by-side Markdown & PDF collation plugin for Obsidian. Features zero-config pairing, one-click PDF-to-Markdown draft extraction, fault-tolerant bidirectional text selection highlighting, synchronized page scrolling, and inline page-block editing.
+**PDF 原件与 Markdown 笔记，一划即定位。** 在 Obsidian 中并排阅读、双向高亮、自动分页、直接修订 OCR 底稿，让文献核查不再依赖反复翻页和搜索。
+
+**[在线体验 Web Demo（无需安装）](https://hongdonglee.github.io/obsidian-pdf-collation/)** · **[下载安装](#安装方式)** · [最新版本](https://github.com/HongdongLee/obsidian-pdf-collation/releases/latest) · [English overview](#english-overview)
+
+For researchers, translators, and digital-humanities scholars: compare PDF originals with Markdown notes, locate selected passages in either direction, and edit paginated drafts—all without an account or cloud upload.
+
+> 本项目目前处于早期版本。无需安装就能先体验浏览器演示；完整插件通过 BRAT 或 GitHub Release 安装。扫描版 PDF 需要先进行 OCR。
 
 ---
 
@@ -14,6 +22,8 @@ Side-by-side Markdown & PDF collation plugin for Obsidian. Features zero-config 
 
 ![PDF Collation Web Demo](web-demo/docs/desktop.png)
 
+**30 秒体验：** ① 打开上面的演示链接；② 在左侧 Markdown 划选一句话，观察 PDF 定位高亮；③ 在 PDF 划选文字，再看 Markdown 如何反向定位。也可以导入自己的本地 PDF 试用（请优先选带文字层的 PDF）。
+
 ```bash
 cd web-demo
 npm install
@@ -24,7 +34,16 @@ npm run dev
 
 ---
 
-## 30 秒零配置上手
+## 它适合谁？
+
+| 你的工作 | 双轨校勘能帮你做什么 |
+| :--- | :--- |
+| **论文阅读与引文核查** | 从 Markdown 笔记快速跳回 PDF 原文，核对上下文与页码 |
+| **翻译与文本编辑** | 左右对照原文、译稿或改订稿；含原文引句的段落可划选定位 |
+| **OCR 文献整理** | 从 PDF 文字层生成分页底稿，结合 Marker、MinerU、Doc2X 的输出逐页纠错 |
+| **古籍整理与数字人文** | 区分书籍印刷页码与 PDF 物理页码，便于人工校勘 |
+
+## Obsidian 插件：零配置上手
 
 甚至不需要提前准备 `.md` 文件，也不需要手写 YAML 路径、手动打页标或预先清洗 OCR 错字。
 
@@ -50,7 +69,7 @@ npm run dev
 | **0. 纯 PDF 裸开** | 只有一份 `.pdf`，没有 `.md` | 右键该 PDF 选「在双轨校勘视图中打开」 | 自动提取文字层、智能分段并生成带 `[pdf. N]` 页标的同名 `.md` 校勘底稿 |
 | **1. 随手通读** | 一篇普通 Markdown + 一份 PDF | 点顶部「绑定 PDF」或同名放置；也可点「⚡ 自动按 PDF 分页」 | 双向划选文字跨全书定位高亮，或一键自动插好全文页标 |
 | **2. OCR 直出对照** | Marker / MinerU / Doc2X 导出的带分页符初稿 | 保留工具自带的 `<!-- page 12 -->`、`--- page 12 ---` 或 `{12}----` | 自动按页切块、左右滚动双向同步翻页、单页就地改字 (`⌘S` 写回) |
-| **3. 学术与古籍精校** | 需要区分「原书印刷页码」与「PDF 物理页码」的定本 | 使用 `[p. 33 / pdf. 35]` 双页标，或用 `[p. 33]` 搭配 frontmatter `pdf_offset: 2` | 吸顶栏同时显示原书页码与 PDF 页码，严格锁页消歧，引文核查零误差 |
+| **3. 学术与古籍精校** | 需要区分「原书印刷页码」与「PDF 物理页码」的定本 | 使用 `[p. 33 / pdf. 35]` 双页标，或用 `[p. 33]` 搭配 frontmatter `pdf_offset: 2` | 吸顶栏同时显示原书页码与 PDF 页码，减少页码错位；重要引文仍需人工核对 |
 
 ### 原生兼容的页标格式
 
@@ -91,7 +110,11 @@ VAULT_PATH="/path/to/your/vault" npm run install-vault
 
 ## English Overview
 
-**PDF Collation** brings a dedicated dual-pane workspace to Obsidian for researchers, translators, and digital humanities scholars who work with PDFs and OCR-generated Markdown notes.
+**Stop losing your place between a PDF and your research notes.** PDF Collation brings a dedicated PDF–Markdown comparison workspace to Obsidian, with bidirectional text-selection highlighting, auto-pagination, and page-by-page editing.
+
+**[Try the live browser demo](https://hongdonglee.github.io/obsidian-pdf-collation/)** · [Latest release](https://github.com/HongdongLee/obsidian-pdf-collation/releases/latest) · [Installation](#安装方式) · [Report an issue](https://github.com/HongdongLee/obsidian-pdf-collation/issues)
+
+**Best for:** academic reading and citation checks, translation, OCR correction, historical texts, and digital humanities. No account, subscription, telemetry, or cloud upload is required for the plugin.
 
 ### Key Features
 
@@ -105,6 +128,12 @@ VAULT_PATH="/path/to/your/vault" npm run install-vault
 - 从 PDF 生成 Markdown 依赖 PDF 自带的文字层；纯扫描图片 PDF 需要先运行 OCR。
 - 自动分页和容错高亮使用文本匹配，对复杂版式、严重 OCR 错误或重复段落仍需人工核对。
 - 当前为 `0.1.2` 初始版本，要求 Obsidian 1.13.7 或更新版本。建议在批量分页或修改重要文献前备份笔记。
+
+## 反馈与支持
+
+- **遇到 Bug 或有改进建议？** 欢迎通过 [GitHub Issues](https://github.com/HongdongLee/obsidian-pdf-collation/issues) 反馈；请尽量附上 Obsidian 版本、插件版本、复现步骤以及适当脱敏的示例文档。
+- **觉得对工作流有帮助？** 可以给 [仓库点一个 Star](https://github.com/HongdongLee/obsidian-pdf-collation)，或把 [在线演示](https://hongdonglee.github.io/obsidian-pdf-collation/) 分享给需要对照 PDF 的朋友。
+- **愿意介绍给社区？** 参见 [中英双语分享素材](docs/SHARE_KIT.md)，也欢迎提出使用场景和改进建议。
 
 ## Privacy and access
 
