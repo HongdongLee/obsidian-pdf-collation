@@ -104,7 +104,7 @@ VAULT_PATH="/path/to/your/vault" npm run install-vault
 
 - 从 PDF 生成 Markdown 依赖 PDF 自带的文字层；纯扫描图片 PDF 需要先运行 OCR。
 - 自动分页和容错高亮使用文本匹配，对复杂版式、严重 OCR 错误或重复段落仍需人工核对。
-- 当前为 `0.1.2` 初始版本，要求 Obsidian 1.13.7 或更新版本。建议在批量分页或修改重要文献前备份笔记。
+- 当前为 `0.1.3`，要求 Obsidian 1.13.7 或更新版本。建议在批量分页或修改重要文献前备份笔记。
 
 ## Privacy and access
 

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-pdf-collation",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Markdown 校订稿与 PDF 原件双栏对照 Obsidian 插件：双向跳页、抹平校订差异的文字层高亮、页块级就地改字",
   "main": "main.js",
   "type": "module",
