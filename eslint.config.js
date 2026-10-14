@@ -4,10 +4,10 @@ import tseslint from 'typescript-eslint'
 import obsidianmd from 'eslint-plugin-obsidianmd'
 
 export default tseslint.config(
-  { ignores: ['main.js', 'node_modules'] },
+  { ignores: ['main.js', 'docs/demo.js', 'node_modules'] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
-    files: ['src/**/*.ts', 'test/**/*.ts'],
+    files: ['src/**/*.ts', 'web/**/*.ts', 'test/**/*.ts'],
     languageOptions: {
       ecmaVersion: 2022,
       globals: {

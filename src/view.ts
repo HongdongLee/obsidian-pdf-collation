@@ -1,5 +1,6 @@
 import {
   ItemView,
+  loadPdfJs,
   MarkdownRenderer,
   Notice,
   TFile,
@@ -9,12 +10,12 @@ import {
   autoInsertPagemarks,
   buildMarkdownFromPdfPages,
   decoratePagemarksInBlock,
+  extractSelectionContext,
   matchSegmentSlices,
   normalizeText,
   parsePagemark,
   replaceBlockInMarkdown,
   splitMarkdownByPagemarks,
-  stripEditorialNoise,
 } from './compare'
 import {
   extractPageOffsetFromFrontmatter,
@@ -33,6 +34,7 @@ import type {
 } from './types'
 
 export const VIEW_TYPE_COLLATION = 'pdf-collation-view'
+const ALIGN_RATIO = 0.35
 
 export interface CollationPluginHost {
   settings: CollationSettings
@@ -50,7 +52,7 @@ export class CollationView extends ItemView {
   // 防止 MD ⇄ PDF 双向滚动联动互相触发形成死循环
   private syncLockSource: 'md' | 'pdf' | null = null
   private syncLockTimer = 0
-  private mdScrollTimer = 0
+  private mdScrollRaf = 0
   private selectionSettleTimer = 0
   private lastMdSyncedPage = 0
   private lastSelectionSig = ''
@@ -67,6 +69,7 @@ export class CollationView extends ItemView {
   private pageTotalSpan!: HTMLSpanElement
   private zoomResetBtn!: HTMLButtonElement
   private gridEl!: HTMLDivElement
+  private guideEl: HTMLDivElement | null = null
   private mdPaneEl!: HTMLDivElement
   private articleEl!: HTMLElement
   private pdfController: PdfPaneController | null = null
@@ -124,6 +127,11 @@ export class CollationView extends ItemView {
       cls: 'compare-grid' + (this.swapped ? ' swapped' : ''),
     })
 
+    this.guideEl = this.gridEl.createDiv({ cls: 'cmp-reading-guide' })
+    this.guideEl.createDiv({ cls: 'cmp-reading-line' })
+    this.guideEl.createSpan({ cls: 'cmp-reading-badge', text: '对齐基准' })
+    this.updateGuideVisibility()
+
     this.mdPaneEl = this.gridEl.createDiv({ cls: 'cmp-pane cmp-md' })
     this.articleEl = this.mdPaneEl.createEl('article', { cls: 'cmp-article' })
 
@@ -140,7 +148,9 @@ export class CollationView extends ItemView {
 
     this.pdfController = new PdfPaneController(this.gridEl, {
       onPageChange: (page, total) => this.onPdfPageChange(page, total),
+      onPdfScrollRatio: (page, ratio) => this.onPdfScrollRatio(page, ratio),
       onPdfSelect: (text, page, context) => this.onPdfSelect(text, page, context),
+      loadPdfJs: () => loadPdfJs(),
     })
 
     this.isOpenComplete = true
@@ -194,7 +204,10 @@ export class CollationView extends ItemView {
   async onClose(): Promise<void> {
     this.isOpenComplete = false
     window.clearTimeout(this.syncLockTimer)
-    window.clearTimeout(this.mdScrollTimer)
+    if (this.mdScrollRaf) {
+      window.cancelAnimationFrame(this.mdScrollRaf)
+      this.mdScrollRaf = 0
+    }
     window.clearTimeout(this.selectionSettleTimer)
     this.pdfController?.destroy()
     this.pdfController = null
@@ -518,6 +531,10 @@ export class CollationView extends ItemView {
     followLabel.appendText('双向联动')
     followInput.addEventListener('change', () => {
       this.follow = followInput.checked
+      this.updateGuideVisibility()
+      if (this.follow) {
+        this.syncMdToPdfByRatio()
+      }
     })
 
     // 左右互换
@@ -795,36 +812,109 @@ export class CollationView extends ItemView {
     return currentBlock
   }
 
+  private updateGuideVisibility(): void {
+    if (!this.guideEl) return
+    this.guideEl.classList.toggle('is-active', this.follow)
+  }
+
+  private currentMdScrollRatio(): { page: number; ratio: number } | null {
+    const blocks = Array.from(
+      this.articleEl.querySelectorAll<HTMLElement>('.cmp-block[data-pdf-page]')
+    )
+    if (!blocks.length) return null
+    const paneRect = this.mdPaneEl.getBoundingClientRect()
+    const targetY = paneRect.top + paneRect.height * ALIGN_RATIO
+
+    let hitBlock: HTMLElement | null = null
+    for (const b of blocks) {
+      const r = b.getBoundingClientRect()
+      if (r.top <= targetY && r.bottom >= targetY) {
+        hitBlock = b
+        break
+      }
+    }
+    if (!hitBlock) {
+      let minDiff = Infinity
+      for (const b of blocks) {
+        const r = b.getBoundingClientRect()
+        const diff = Math.min(Math.abs(r.top - targetY), Math.abs(r.bottom - targetY))
+        if (diff < minDiff) {
+          minDiff = diff
+          hitBlock = b
+        }
+      }
+    }
+    if (!hitBlock) return null
+    const page = Number(hitBlock.dataset.pdfPage) || 1
+    const rect = hitBlock.getBoundingClientRect()
+    const height = Math.max(rect.height, 1)
+    const ratio = Math.max(0, Math.min(1, (targetY - rect.top) / height))
+    return { page, ratio }
+  }
+
+  private syncMdToPdfByRatio(): void {
+    if (this.isRenderingMd || !this.follow || this.syncLockSource === 'pdf') return
+    const state = this.currentMdScrollRatio()
+    if (!state) return
+    const blocks = Array.from(
+      this.articleEl.querySelectorAll<HTMLElement>('.cmp-block[data-pdf-page]')
+    )
+    const hitBlock = blocks.find((b) => Number(b.dataset.pdfPage) === state.page)
+    if (hitBlock) this.setActiveBlock(hitBlock)
+
+    this.lockSync('md', 240)
+    this.pdfController?.scrollToPageRatio(state.page, state.ratio)
+  }
+
   /**
-   * 左栏滚动 → 自动检测当前阅读的页块并同步右侧 PDF
+   * 左栏滚动 → 按 35% 视准线连续比例平滑同步右侧 PDF
    */
   private onMdScroll(): void {
     if (this.isRenderingMd || !this.follow) return
     if (this.syncLockSource === 'pdf') {
-      // 平滑滚动动画进行中持续续期锁，避免动画尾帧反弹触发反向跳转
       this.lockSync('pdf', 260)
       return
     }
-    if (this.mdScrollTimer) return
+    if (this.mdScrollRaf) return
 
-    this.mdScrollTimer = window.setTimeout(() => {
-      this.mdScrollTimer = 0
+    this.mdScrollRaf = window.requestAnimationFrame(() => {
+      this.mdScrollRaf = 0
       if (this.isRenderingMd || !this.follow || this.syncLockSource === 'pdf') return
+      this.syncMdToPdfByRatio()
+    })
+  }
 
-      const blocks = Array.from(
-        this.articleEl.querySelectorAll<HTMLElement>('.cmp-block[data-pdf-page]')
-      )
-      const currentBlock = this.getCurrentMdBlock(blocks)
-      if (!currentBlock) return
+  /**
+   * 右侧 PDF 连续滚动 → 驱动左栏 Markdown 按视准线平滑对齐
+   */
+  private onPdfScrollRatio(page: number, ratio: number): void {
+    if (this.isRenderingMd || !this.follow || this.syncLockSource === 'md') return
 
-      this.setActiveBlock(currentBlock)
-      const page = Number(currentBlock.dataset.pdfPage)
-      if (page > 0 && page !== this.lastMdSyncedPage && page !== this.pdfController?.currentPage) {
-        this.lastMdSyncedPage = page
-        this.lockSync('md', 650)
-        this.pdfController?.scrollToPage(page, true)
+    const blocks = Array.from(
+      this.articleEl.querySelectorAll<HTMLElement>('.cmp-block[data-pdf-page]')
+    )
+    if (!blocks.length) return
+    let target: HTMLElement | null =
+      blocks.find((el) => Number(el.dataset.pdfPage) === page) ?? null
+    if (!target) {
+      let bestLePage = -Infinity
+      for (const el of blocks) {
+        const p = Number(el.dataset.pdfPage)
+        if (p <= page && p >= bestLePage) {
+          bestLePage = p
+          target = el
+        }
       }
-    }, 90)
+    }
+    if (!target) target = blocks[0]
+
+    this.setActiveBlock(target)
+
+    const paneH = this.mdPaneEl.clientHeight
+    const baselineY = paneH * ALIGN_RATIO
+    const targetTop = target.offsetTop + target.offsetHeight * ratio - baselineY
+    this.lockSync('pdf', 240)
+    this.mdPaneEl.scrollTop = Math.max(0, targetTop)
   }
 
   private onMdClick(e: MouseEvent): void {
@@ -958,35 +1048,24 @@ export class CollationView extends ItemView {
     const bodyEl =
       (anchorEl.closest('.cmp-block-body') as HTMLElement | null) ?? blockEl ?? this.articleEl
 
-    // 必须在 clearMarkdownInlineHighlights() 之前提取上下文，否则移除 <mark> 并 normalize() 会令 range 节点失效
-    let before = ''
-    let after = ''
-    let progress: number | undefined
-    try {
-      const preRange = document.createRange()
-      preRange.selectNodeContents(bodyEl)
-      preRange.setEnd(range.startContainer, range.startOffset)
-      const rawBefore = preRange.toString()
-      before = stripEditorialNoise(rawBefore).slice(-80)
-
-      const postRange = document.createRange()
-      postRange.selectNodeContents(bodyEl)
-      postRange.setStart(range.endContainer, range.endOffset)
-      const rawAfter = postRange.toString()
-      after = stripEditorialNoise(rawAfter).slice(0, 80)
-
-      const bLen = normalizeText(rawBefore).length
-      const sLen = normalizeText(text).length
-      const aLen = normalizeText(rawAfter).length
-      const total = bLen + sLen + aLen
-      if (total > 0) {
-        progress = bLen / total
-      }
-    } catch {
-      // ignore range errors
-    }
+    const ctx = extractSelectionContext(range, bodyEl)
 
     this.clearMarkdownInlineHighlights()
+
+    // 选区自身吸附对齐到 35% 视准线
+    const paneRect = this.mdPaneEl.getBoundingClientRect()
+    const selRect = range.getBoundingClientRect()
+    if (selRect.height > 0) {
+      const baselineY = paneRect.top + paneRect.height * ALIGN_RATIO
+      const delta = selRect.top - baselineY
+      if (Math.abs(delta) > 8) {
+        this.lockSync('md', 900)
+        this.mdPaneEl.scrollTo({
+          top: Math.max(0, this.mdPaneEl.scrollTop + delta),
+          behavior: 'smooth',
+        })
+      }
+    }
 
     const blockPage = Number(blockEl?.dataset.pdfPage) || 0
     const hasPagemarks = (this.splitState?.blocks.some((b) => b.pdfPage != null)) ?? false
@@ -995,7 +1074,12 @@ export class CollationView extends ItemView {
 
     this.lockSync('md', 900)
     this.pdfController
-      ?.highlightOnPage(preferredPage, text, { before, after, progress, strictPage })
+      ?.highlightOnPage(preferredPage, text, {
+        before: ctx.before,
+        after: ctx.after,
+        progress: ctx.progress,
+        strictPage,
+      })
       .then((res) => {
         if (res.count === 0) {
           new Notice(`PDF 第 ${preferredPage} 页中未找到与选中内容匹配的文本`)
@@ -1155,22 +1239,17 @@ export class CollationView extends ItemView {
     if (firstMark) {
       const paneRect = this.mdPaneEl.getBoundingClientRect()
       const markRect = firstMark.getBoundingClientRect()
-      const margin = Math.min(72, this.mdPaneEl.clientHeight * 0.14)
-      const alreadyVisible =
-        markRect.top >= paneRect.top + margin &&
-        markRect.bottom <= paneRect.bottom - margin
-      if (!alreadyVisible) {
-        const targetScroll =
-          this.mdPaneEl.scrollTop +
-          (markRect.top - paneRect.top) -
-          this.mdPaneEl.clientHeight * 0.32
+      const baselineY = paneRect.top + paneRect.height * ALIGN_RATIO
+      const delta = markRect.top - baselineY
+      if (Math.abs(delta) > 8) {
         this.mdPaneEl.scrollTo({
-          top: Math.max(0, targetScroll),
+          top: Math.max(0, this.mdPaneEl.scrollTop + delta),
           behavior: 'smooth',
         })
       }
     } else {
-      const top = targetBlock.offsetTop - 16
+      const paneH = this.mdPaneEl.clientHeight
+      const top = targetBlock.offsetTop - paneH * ALIGN_RATIO
       if (Math.abs(this.mdPaneEl.scrollTop - top) > 48) {
         this.mdPaneEl.scrollTo({
           top: Math.max(0, top),

@@ -1,4 +1,3 @@
-import { loadPdfJs } from 'obsidian'
 import { matchPdfTextSlices, normalizeText } from './compare'
 import {
   buildTextLayer,
@@ -14,9 +13,14 @@ interface PageMeta {
   h: number
 }
 
+const ALIGN_RATIO = 0.35
+
 export interface PdfPaneCallbacks {
   onPageChange: (page: number, totalPages: number) => void
   onPdfSelect: (selectedText: string, page: number, context: SelectionContext) => void
+  onPdfScrollRatio?: (page: number, ratio: number) => void
+  loadPdfJs: () => Promise<any>
+  pdfJsBaseUrl?: string
 }
 
 export interface HighlightOptions extends SelectionContext {
@@ -33,7 +37,7 @@ export interface HighlightResult {
 }
 
 /**
- * 原生 DOM 驱动的虚拟化 PDF 渲染面板（复用 Obsidian 内置 loadPdfJs、TextLayer 与 cmaps 字体库）
+ * 原生 DOM 驱动的虚拟化 PDF 渲染面板（支持 Obsidian 内置 loadPdfJs 与独立浏览器环境）
  */
 export class PdfPaneController {
   private wrapEl: HTMLDivElement
@@ -63,6 +67,7 @@ export class PdfPaneController {
   private curPage = 0
   private numPages = 0
   private updateTimer = 0
+  private scrollRaf = 0
   private resizeObserver: ResizeObserver | null = null
   private destroyed = false
   private callbacks: PdfPaneCallbacks
@@ -92,7 +97,16 @@ export class PdfPaneController {
 
     parentEl.append(this.wrapEl)
 
-    this.paneEl.addEventListener('scroll', () => this.scheduleUpdate())
+    this.paneEl.addEventListener('scroll', () => {
+      this.scheduleUpdate()
+      if (!this.callbacks.onPdfScrollRatio) return
+      if (this.scrollRaf) return
+      this.scrollRaf = window.requestAnimationFrame(() => {
+        this.scrollRaf = 0
+        const { page, ratio } = this.currentScrollState()
+        this.callbacks.onPdfScrollRatio?.(page, ratio)
+      })
+    })
   }
 
   get totalPages(): number {
@@ -139,22 +153,23 @@ export class PdfPaneController {
     this.badgeEl.classList.add('cmp-hidden')
 
     try {
-      const pdfjs: any = await loadPdfJs()
+      const pdfjs: any = await this.callbacks.loadPdfJs()
       if (this.destroyed || seq !== this.loadSeq) return
       this.pdfjs = pdfjs
 
+      const baseUrl = this.callbacks.pdfJsBaseUrl ?? '/lib/pdfjs/'
       if (pdfjs.GlobalWorkerOptions && !pdfjs.GlobalWorkerOptions.workerSrc) {
-        pdfjs.GlobalWorkerOptions.workerSrc = '/lib/pdfjs/pdf.worker.min.mjs'
+        pdfjs.GlobalWorkerOptions.workerSrc = `${baseUrl}pdf.worker.min.mjs`
       }
 
-      // 挂载 Obsidian 内置的 CMap 与标准字体库，确保知网/古籍等非内嵌 CJK 字体完整渲染
+      // 挂载 CMap 与标准字体库，确保知网/古籍等非内嵌 CJK 字体完整渲染
       const loadingTask = pdfjs.getDocument({
         url: resourceUrl,
-        cMapUrl: '/lib/pdfjs/cmaps/',
+        cMapUrl: `${baseUrl}cmaps/`,
         cMapPacked: true,
-        standardFontDataUrl: '/lib/pdfjs/standard_fonts/',
-        wasmUrl: '/lib/pdfjs/wasm/',
-        iccUrl: '/lib/pdfjs/iccs/',
+        standardFontDataUrl: `${baseUrl}standard_fonts/`,
+        wasmUrl: `${baseUrl}wasm/`,
+        iccUrl: `${baseUrl}iccs/`,
         isEvalSupported: false,
       })
       const doc = await loadingTask.promise
@@ -242,6 +257,41 @@ export class PdfPaneController {
       this.updateTimer = 0
     }
     this.updateVisible()
+  }
+
+  currentScrollState(): { page: number; ratio: number } {
+    if (!this.numPages) return { page: 1, ratio: 0 }
+    const probe = this.paneEl.scrollTop + this.paneEl.clientHeight * ALIGN_RATIO
+    let cur = 1
+    let curContainer: HTMLDivElement | undefined
+    for (const [n, c] of this.containers) {
+      if (c.offsetTop <= probe) {
+        cur = n
+        curContainer = c
+      } else {
+        break
+      }
+    }
+    const ratio =
+      curContainer && curContainer.offsetHeight > 0
+        ? Math.max(0, Math.min(1, (probe - curContainer.offsetTop) / curContainer.offsetHeight))
+        : 0
+    return { page: cur, ratio }
+  }
+
+  scrollToPageRatio(page: number, ratio: number): void {
+    if (!this.numPages) return
+    const target = Math.max(1, Math.min(page, this.numPages))
+    const c = this.containers.get(target)
+    if (!c) return
+    const clampedRatio = Math.max(0, Math.min(1, ratio))
+    const targetTop = Math.max(
+      0,
+      c.offsetTop + clampedRatio * c.offsetHeight - this.paneEl.clientHeight * ALIGN_RATIO
+    )
+    this.paneEl.scrollTop = targetTop
+    this.curPage = target
+    this.scheduleUpdate()
   }
 
   clearHighlight(): void {
@@ -449,6 +499,17 @@ export class PdfPaneController {
       }
     })
 
+    // 平滑微调选区吸附对齐到视准线
+    if (sel.rangeCount > 0) {
+      const selRect = range.getBoundingClientRect()
+      const paneRect = this.paneEl.getBoundingClientRect()
+      const selTopInPane = selRect.top - paneRect.top + this.paneEl.scrollTop
+      const targetTop = Math.max(0, selTopInPane - this.paneEl.clientHeight * ALIGN_RATIO)
+      if (Math.abs(this.paneEl.scrollTop - targetTop) > 20) {
+        this.paneEl.scrollTo({ top: targetTop, behavior: 'smooth' })
+      }
+    }
+
     this.callbacks.onPdfSelect(text, page, { before, after, progress })
     return true
   }
@@ -492,17 +553,13 @@ export class PdfPaneController {
 
     if (scrollIntoCenter && Number.isFinite(minTop)) {
       const hlTop = c.offsetTop + minTop
-      const hlBottom = c.offsetTop + (Number.isFinite(maxBottom) ? maxBottom : minTop + 24)
-      const viewTop = this.paneEl.scrollTop
       const viewHeight = this.paneEl.clientHeight
-      const viewBottom = viewTop + viewHeight
-      const margin = Math.min(72, viewHeight * 0.14)
-
-      const alreadyVisible = hlTop >= viewTop + margin && hlBottom <= viewBottom - margin
-      if (!alreadyVisible) {
-        const targetScroll = Math.max(0, hlTop - viewHeight * 0.32)
-        this.paneEl.scrollTo({ top: targetScroll, behavior: 'smooth' })
-      }
+      const targetScroll = Math.max(0, hlTop - viewHeight * ALIGN_RATIO)
+      const dist = Math.abs(this.paneEl.scrollTop - targetScroll)
+      this.paneEl.scrollTo({
+        top: targetScroll,
+        behavior: dist > viewHeight * 2 ? 'auto' : 'smooth',
+      })
       this.scheduleUpdate()
     }
   }
@@ -685,7 +742,7 @@ export class PdfPaneController {
       c.append(tl)
 
       const cssViewport = page.getViewport({ scale })
-      if (typeof this.pdfjs?.TextLayer === 'function') {
+      if (typeof this.pdfjs?.TextLayer === 'function' && !doc.useSimpleTextLayer) {
         const tlInstance = new this.pdfjs.TextLayer({
           textContentSource: tc,
           container: tl,
@@ -798,7 +855,9 @@ export class PdfPaneController {
     for (let p = f - 1; p <= f + 2; p++) {
       void this.renderPage(p)
     }
+    const protectedPage = this.activeHighlight ? this.activeHighlight.page : -1
     for (const n of Array.from(this.rendered.keys())) {
+      if (n === protectedPage) continue
       if (n < f - 3 || n > f + 3) this.clearPageDom(n)
     }
   }

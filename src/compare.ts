@@ -1199,3 +1199,68 @@ export function buildMarkdownFromPdfPages(
 
   return lines.join('\n')
 }
+
+/**
+ * 从浏览器原生选区和所属容器中提取前后文与垂直位置比例，用于简短词和多处重名文本的精准消歧
+ */
+export function extractSelectionContext(
+  target: Selection | Range,
+  containerEl?: HTMLElement | null
+): SelectionContext {
+  const range =
+    target instanceof Range
+      ? target
+      : !target || target.rangeCount === 0 || target.isCollapsed
+        ? null
+        : target.getRangeAt(0)
+  if (!range) return {}
+  let before = ''
+  let after = ''
+  let progress: number | undefined
+
+  if (
+    containerEl &&
+    containerEl.contains(range.startContainer) &&
+    containerEl.contains(range.endContainer)
+  ) {
+    try {
+      const beforeRange = document.createRange()
+      beforeRange.selectNodeContents(containerEl)
+      beforeRange.setEnd(range.startContainer, range.startOffset)
+      before = beforeRange.toString().slice(-60)
+    } catch {
+      // 跨节点异常忽略
+    }
+
+    try {
+      const afterRange = document.createRange()
+      afterRange.selectNodeContents(containerEl)
+      afterRange.setStart(range.endContainer, range.endOffset)
+      after = afterRange.toString().slice(0, 60)
+    } catch {
+      // 跨节点异常忽略
+    }
+
+    try {
+      const selRect = range.getBoundingClientRect()
+      const containerRect = containerEl.getBoundingClientRect()
+      if (containerRect.height > 0) {
+        progress = Math.max(0, Math.min(1, (selRect.top - containerRect.top) / containerRect.height))
+      }
+    } catch {
+      // 坐标计算异常忽略
+    }
+  }
+
+  // 兜底：如果从父容器提取为空，从当前的文本节点提取本节点内的前后文
+  if (!before && range.startContainer.nodeType === Node.TEXT_NODE) {
+    const val = range.startContainer.nodeValue || ''
+    before = val.slice(0, range.startOffset).slice(-40)
+  }
+  if (!after && range.endContainer.nodeType === Node.TEXT_NODE) {
+    const val = range.endContainer.nodeValue || ''
+    after = val.slice(range.endOffset).slice(0, 40)
+  }
+
+  return { before, after, progress }
+}
