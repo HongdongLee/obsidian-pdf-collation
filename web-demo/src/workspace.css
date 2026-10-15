@@ -1425,6 +1425,25 @@ body,
   border-radius: 4px;
   padding: 2px 5px;
 }
+.md-page-block {
+  position: relative;
+  isolation: isolate;
+}
+.md-marks-layer {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+.md-highlight-box {
+  position: absolute;
+  background: rgba(251, 206, 72, 0.6);
+  border-bottom: 1px solid rgba(180, 132, 38, 0.45);
+  border-radius: 2px;
+}
+.dark .md-highlight-box {
+  background: rgba(253, 201, 65, 0.35);
+}
 @media (max-width: 800px) {
   .reading-guide {
     left: 6px;

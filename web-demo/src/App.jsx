@@ -277,11 +277,14 @@ function MarkdownBlock({
           onChange={(e) => onChange(block.index, e.target.value)}
         />
       ) : (
-        <div className="md-prose">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-            {content || "（本页暂无文本）"}
-          </ReactMarkdown>
-        </div>
+        <>
+          <div className="md-prose">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {content || "（本页暂无文本）"}
+            </ReactMarkdown>
+          </div>
+          <div className="md-marks-layer" aria-hidden="true" />
+        </>
       )}
     </article>
   );
@@ -824,11 +827,11 @@ export default function App() {
     };
   }, [pdfItems, displayBlocks, synced, editing, currentPage, tourStep]);
 
-  // Browser CSS highlights preserve React's DOM ownership and support fragmented Markdown formatting.
+  // Keep React's text nodes intact, including in browsers without CSS highlights.
   useEffect(() => {
-    if (!CSS.highlights) return;
-    CSS.highlights.delete("collatio-md-match");
+    CSS.highlights?.delete("collatio-md-match");
     if (!mdMatch || editing) return;
+    let clearFallback = () => {};
     const blocks = [...document.querySelectorAll(".md-page-block")];
     const preferred = blocks.filter((b) =>
       mdMatch.blockIndex != null
@@ -861,11 +864,45 @@ export default function App() {
         if (!r.collapsed) ranges.push(r);
       }
       if (!ranges.length) continue;
-      CSS.highlights.set("collatio-md-match", new Highlight(...ranges));
+      if (CSS.highlights && typeof Highlight !== "undefined") {
+        CSS.highlights.set("collatio-md-match", new Highlight(...ranges));
+      } else {
+        const holder = block.querySelector(".md-marks-layer");
+        if (holder) {
+          const draw = () => {
+            holder.replaceChildren();
+            const origin = holder.getBoundingClientRect();
+            for (const range of ranges) {
+              for (const rect of range.getClientRects()) {
+                if (!rect.width || !rect.height) continue;
+                const marker = document.createElement("div");
+                marker.className = "md-highlight-box";
+                Object.assign(marker.style, {
+                  left: rect.left - origin.left + "px",
+                  top: rect.top - origin.top + "px",
+                  width: rect.width + "px",
+                  height: rect.height + "px",
+                });
+                holder.appendChild(marker);
+              }
+            }
+          };
+          draw();
+          const observer = new ResizeObserver(draw);
+          observer.observe(prose);
+          clearFallback = () => {
+            observer.disconnect();
+            holder.replaceChildren();
+          };
+        }
+      }
       alignRange(mdScrollRef.current, ranges[0]);
       break;
     }
-    return () => CSS.highlights.delete("collatio-md-match");
+    return () => {
+      CSS.highlights?.delete("collatio-md-match");
+      clearFallback();
+    };
   }, [mdMatch, markdown, editing]);
 
   const demoMdToPdf = () => {

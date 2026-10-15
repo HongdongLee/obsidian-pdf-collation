@@ -207,6 +207,125 @@ async function waitForPdfHighlightAtText(page, number, text, occurrence = 0) {
   );
 }
 
+async function waitForMdOverlay(page, number, text) {
+  await page.waitForFunction(
+    ({ number, text, rangeSource }) => {
+      const prose = document.querySelector(`[data-page="${number}"] .md-prose`);
+      const marks = [
+        ...document.querySelectorAll(
+          `[data-page="${number}"] .md-highlight-box`,
+        ),
+      ];
+      if (!prose || !marks.length) return false;
+      const findRange = new Function("return " + rangeSource)();
+      const range = findRange(prose, text);
+      if (!range) return false;
+      const targets = [...range.getClientRects()].filter(
+        (rect) => rect.width > 0 && rect.height > 0,
+      );
+      const boxes = marks.map((mark) => mark.getBoundingClientRect());
+      return (
+        targets.length > 0 &&
+        targets.every((target) =>
+          boxes.some(
+            (box) =>
+              Math.abs(box.top - target.top) < 3 &&
+              box.left <= target.left + 2 &&
+              box.right >= target.right - 2 &&
+              box.bottom >= target.bottom - 2,
+          ),
+        )
+      );
+    },
+    { number, text, rangeSource: findTextRange.toString() },
+  );
+}
+
+async function checkHighlightFallback(browser, errors) {
+  const fallback = await browser.newPage({
+    viewport: { width: 1440, height: 900 },
+  });
+  fallback.on("pageerror", (error) =>
+    errors.push("highlight fallback: " + error.message),
+  );
+  fallback.on("console", (message) => {
+    if (message.type() === "error")
+      errors.push("highlight fallback: " + message.text());
+  });
+  try {
+    await fallback.addInitScript(() => {
+      Object.defineProperty(CSS, "highlights", {
+        configurable: true,
+        value: undefined,
+      });
+      Object.defineProperty(window, "Highlight", {
+        configurable: true,
+        value: undefined,
+      });
+    });
+    await fallback.goto(url, { waitUntil: "domcontentloaded" });
+    assert.ok(
+      await fallback.evaluate(
+        () => !CSS.highlights && typeof Highlight === "undefined",
+      ),
+      "Compatibility page must have neither highlight API",
+    );
+    await fallback
+      .locator('[data-pdf-page="2"] canvas')
+      .waitFor({ timeout: 20000 });
+    await fallback
+      .locator(".md-highlight-box")
+      .first()
+      .waitFor({ state: "attached", timeout: 20000 });
+    await waitForMdOverlay(
+      fallback,
+      1,
+      "面对同一部作品，研究者往往有 PDF 原件",
+    );
+    assert.equal(
+      await fallback.locator('.md-marks-layer[aria-hidden="true"]').count(),
+      12,
+    );
+
+    await fallback.getByRole("button", { name: "更多操作" }).click();
+    await fallback.getByRole("menuitem", { name: "新手教程" }).click();
+    await fallback.getByRole("button", { name: "下一步", exact: true }).click();
+    await fallback.getByRole("button", { name: "下一步", exact: true }).click();
+    await fallback.getByRole("button", { name: /演示：PDF/ }).click();
+    const target = "只有把出处放在眼前，才可能把解释留在证据之内";
+    await waitForMdOverlay(fallback, 2, target);
+    assert.equal(await fallback.locator(".page-current").innerText(), "2");
+    assert.equal(
+      await fallback.locator('[data-page="1"] .md-highlight-box').count(),
+      0,
+      "Fallback must replace the previous match",
+    );
+    await fallback.getByRole("button", { name: "退出教程" }).click();
+
+    const originalWidth = await fallback
+      .locator('[data-page="2"] .md-prose')
+      .evaluate((el) => el.getBoundingClientRect().width);
+    await fallback.setViewportSize({ width: 1040, height: 900 });
+    await fallback.waitForFunction(
+      (width) =>
+        document
+          .querySelector('[data-page="2"] .md-prose')
+          .getBoundingClientRect().width <
+        width - 80,
+      originalWidth,
+    );
+    await waitForMdOverlay(fallback, 2, target);
+    await scrollToProgress(fallback, "pdf", 8, 0.45);
+    await waitForMdOverlay(fallback, 2, target);
+    assert.ok(
+      await fallback.locator('[data-page="2"] .md-highlight-box').count(),
+      "Fallback highlights must survive scrolling to a distant page",
+    );
+  } finally {
+    await fallback.close();
+  }
+}
+
 // A one-page PDF with three identical paragraphs makes word context ambiguous.
 // Only the selection's real vertical progress identifies the last occurrence.
 const repeatedParagraph =
@@ -246,7 +365,7 @@ function repetitionPdf() {
   return Buffer.from(pdf);
 }
 
-try {
+async function runFullSmoke() {
   const page = await browser.newPage({
     viewport: { width: 1440, height: 900 },
     acceptDownloads: true,
@@ -644,10 +763,27 @@ try {
     390,
   );
   await mobile.screenshot({ path: "docs/mobile.png", fullPage: true });
+  await checkHighlightFallback(browser, errors);
   assert.deepEqual(errors, [], "No browser exceptions or console errors");
   console.log(
-    "PASS: v0.1.3, 35% reading guides, bidirectional within-page scroll, retained highlights across distant pages and zoom, repeated-word context/progress, actual PDF selection page, five-step tutorial and one-page PDF bounds, search/keyboard, edit/export, mobile.",
+    "PASS: v0.1.3, 35% reading guides, bidirectional within-page scroll, retained highlights across distant pages and zoom, repeated-word context/progress, actual PDF selection page, five-step tutorial and one-page PDF bounds, highlight API compatibility, search/keyboard, edit/export, mobile.",
   );
+}
+
+try {
+  if (process.env.SMOKE_CASE === "highlight-fallback") {
+    await checkHighlightFallback(browser, errors);
+    assert.deepEqual(
+      errors,
+      [],
+      "No fallback browser exceptions or console errors",
+    );
+    console.log(
+      "PASS: Markdown highlight fallback without CSS.highlights or Highlight, PDF-to-Markdown navigation, resize recalculation, scroll retention.",
+    );
+  } else {
+    await runFullSmoke();
+  }
 } finally {
   await browser.close();
 }
