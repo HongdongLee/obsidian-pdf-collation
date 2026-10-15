@@ -8,7 +8,9 @@ Side-by-side Markdown & PDF collation plugin for Obsidian. Features zero-config 
 
 ## Web Demo / 浏览器体验版
 
-一个无需安装 Obsidian 的本地优先体验站：可双栏阅读 PDF 与 Markdown、双向划选定位、生成校勘底稿、自动分页和下载改订稿。默认含十二页示例文献，也支持本地导入自己的文件。
+一个无需安装 Obsidian 的本地优先体验站，现已同步 **v0.1.3**：可双栏阅读 PDF 与 Markdown、双向划选定位、生成校勘底稿、自动分页和下载改订稿。阅读时以距顶部 **35% 的基准线**定位当前页，双栏按页内比例连续跟随；划选结合前后文和实际页码消歧，高亮在滚动、缩放后保持对齐。
+
+默认含十二页示例文献，也支持本地导入自己的文件。「更多 → 新手教程」提供五步引导和真实的双向选择、阅读联动与高亮保持演示，可直接核验新版行为。
 
 [**在线体验 Collatio Web Demo**](https://hongdonglee.github.io/obsidian-pdf-collation/)
 

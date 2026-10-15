@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'web-demo/**'
+      - 'manifest.json'
       - 'src/compare.ts'
       - 'src/pdf-dom.ts'
       - '.github/workflows/pages.yml'

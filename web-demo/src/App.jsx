@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import SEED_MD from "./sample.md?raw";
+import manifest from "../../manifest.json";
 import ReactMarkdown from "react-markdown";
 import { buildSearchDocuments, searchDocuments } from "./search.js";
 import remarkGfm from "remark-gfm";
@@ -44,10 +45,10 @@ import {
 import {
   autoInsertPagemarks,
   buildMarkdownFromPdfPages,
+  extractSelectionContext,
   matchPdfTextSlices,
   normalizeText,
   matchSegmentSlices,
-  stripEditorialNoise,
   replaceBlockInMarkdown,
   splitMarkdownByPagemarks,
 } from "../../src/compare.ts";
@@ -58,6 +59,38 @@ import {
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 const REPO_URL = "https://github.com/HongdongLee/obsidian-pdf-collation";
+const ALIGN_RATIO = 0.35;
+
+function readingPosition(pane, selector) {
+  if (!pane) return null;
+  const line =
+    pane.getBoundingClientRect().top + pane.clientHeight * ALIGN_RATIO;
+  const sections = [...pane.querySelectorAll(selector)];
+  if (!sections.length) return null;
+  const section = sections.reduce((nearest, candidate) => {
+    const distance = (el) => {
+      const rect = el.getBoundingClientRect();
+      return Math.max(rect.top - line, line - rect.bottom, 0);
+    };
+    return distance(candidate) < distance(nearest) ? candidate : nearest;
+  });
+  const rect = section.getBoundingClientRect();
+  return {
+    page: Number(section.dataset.pdfPage || section.dataset.page),
+    ratio: Math.max(
+      0,
+      Math.min(1, (line - rect.top) / Math.max(1, rect.height)),
+    ),
+  };
+}
+
+function ReadingGuide({ visible }) {
+  return visible ? (
+    <div className="reading-guide" aria-hidden="true">
+      <span>对齐基准</span>
+    </div>
+  ) : null;
+}
 
 const safeName = (name, fallback) =>
   (name || fallback).replace(/[^\w\-.\u4e00-\u9fff\s]/g, "_");
@@ -197,12 +230,6 @@ function MarkdownBlock({
   onChange,
   pageFallback,
 }) {
-  const ref = useRef(null);
-  useEffect(() => {
-    if (active && highlighted && ref.current)
-      ref.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [active, highlighted]);
-
   const content = block.markdown
     .replace(
       /^\s*(?:\[p\.[^\]\n]+\]|\[pdf\.\s*\d+\]|<!--[ \t]*(?:pdf|page)[^>]*-->|---+\s*page\s+\d+\s*---+)\s*\n?/i,
@@ -211,7 +238,6 @@ function MarkdownBlock({
     .trim();
   return (
     <article
-      ref={ref}
       className={
         "md-page-block" +
         (active ? " is-active" : "") +
@@ -222,9 +248,15 @@ function MarkdownBlock({
         const paragraph = e.target.closest(
           ".md-prose p, .md-prose h1, .md-prose h2, .md-prose h3",
         );
-        if (paragraph && paragraph.textContent.trim())
-          onSelect(paragraph.textContent.trim().slice(0, 180), block.pdfPage);
-        else onClick(block.pdfPage || pageFallback);
+        if (paragraph && paragraph.textContent.trim()) {
+          const range = document.createRange();
+          range.selectNodeContents(paragraph);
+          onSelect(
+            paragraph.textContent.trim(),
+            block.pdfPage,
+            extractSelectionContext(range, paragraph.closest(".md-prose")),
+          );
+        } else onClick(block.pdfPage || pageFallback);
       }}
     >
       <div className="md-page-label">
@@ -245,14 +277,7 @@ function MarkdownBlock({
           onChange={(e) => onChange(block.index, e.target.value)}
         />
       ) : (
-        <div
-          className="md-prose"
-          onMouseUp={() => {
-            const selection = window.getSelection()?.toString().trim();
-            if (selection && selection.length > 1)
-              onSelect(selection, block.pdfPage);
-          }}
-        >
+        <div className="md-prose">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
             {content || "（本页暂无文本）"}
           </ReactMarkdown>
@@ -312,7 +337,7 @@ export default function App() {
   const [mdMatch, setMdMatch] = useState(null);
   const [tourStep, setTourStep] = useState(-1);
   const mdScrollRef = useRef(null);
-  const selectionSignature = useRef("");
+  const selectionSignature = useRef(null);
   const selectionTimer = useRef(null);
   const [toast, setToast] = useState("");
   const [status, setStatus] = useState("本地处理 · 数据不上传");
@@ -335,16 +360,68 @@ export default function App() {
     clearTimeout(scrollGuardTimer.current);
     scrollGuardTimer.current = setTimeout(() => {
       scrollGuard.current = null;
-    }, 500);
+    }, 260);
+  };
+  const releaseScroll = () => {
+    clearTimeout(scrollGuardTimer.current);
+    scrollGuard.current = null;
+  };
+  const alignSection = (pane, section, ratio, source) => {
+    if (!pane || !section) return;
+    const rect = section.getBoundingClientRect();
+    lockScroll(source);
+    pane.scrollTo({
+      top:
+        pane.scrollTop +
+        rect.top -
+        pane.getBoundingClientRect().top +
+        rect.height * ratio -
+        pane.clientHeight * ALIGN_RATIO,
+      behavior: "instant",
+    });
+  };
+  const alignRange = (pane, range) => {
+    if (!pane) return;
+    const rect = range.getBoundingClientRect();
+    if (!rect.height) return;
+    lockScroll("nav");
+    pane.scrollTo({
+      top:
+        pane.scrollTop +
+        rect.top -
+        pane.getBoundingClientRect().top -
+        pane.clientHeight * ALIGN_RATIO,
+      behavior: "instant",
+    });
+  };
+  const scrollPdfRatio = (n, ratio, source) => {
+    const pane = pdfHolder.current;
+    alignSection(
+      pane,
+      pane?.querySelector('[data-pdf-page="' + n + '"]'),
+      ratio,
+      source,
+    );
+  };
+  const scrollMarkdownRatio = (n, ratio, source) => {
+    const pane = mdScrollRef.current;
+    const sections = [...(pane?.querySelectorAll("[data-page]") || [])];
+    // Sparse page markers cover the following pages until the next marker.
+    const section =
+      sections.find((el) => Number(el.dataset.page) === n) ||
+      sections.filter((el) => Number(el.dataset.page) <= n).at(-1) ||
+      sections[0];
+    alignSection(pane, section, ratio, source);
   };
   const scrollToPdf = (n, source = "nav", focusSlice = null) => {
     const pane = pdfHolder.current;
     const section = pane?.querySelector('[data-pdf-page="' + n + '"]');
     if (!pane || !section) return;
     lockScroll(source);
+    const canvas = section.querySelector(".pdf-canvas-wrap, .pdf-placeholder");
     const pageTop =
       pane.scrollTop +
-      section.getBoundingClientRect().top -
+      (focusSlice ? canvas || section : section).getBoundingClientRect().top -
       pane.getBoundingClientRect().top;
     const size = pdfSizes[n - 1] || pdfSizes[0];
     const pageWidth =
@@ -353,28 +430,14 @@ export default function App() {
     const pdfY = focusSlice?.item?.transform?.[5];
     const offset =
       size && Number.isFinite(pdfY)
-        ? Math.max(
-            0,
-            ((size.height - pdfY) * pageWidth) / size.width -
-              pane.clientHeight * 0.32,
-          )
+        ? ((size.height - pdfY - (focusSlice.item.height || 0)) * pageWidth) /
+            size.width -
+          pane.clientHeight * ALIGN_RATIO
         : 0;
     pane.scrollTo({ top: pageTop + offset, behavior: "instant" });
   };
-  const scrollToMarkdown = (n, source = "pdf") => {
-    const pane = mdScrollRef.current;
-    const section = pane?.querySelector('[data-page="' + n + '"]');
-    if (!pane || !section) return;
-    lockScroll(source);
-    pane.scrollTo({
-      top:
-        pane.scrollTop +
-        section.getBoundingClientRect().top -
-        pane.getBoundingClientRect().top -
-        14,
-      behavior: "instant",
-    });
-  };
+  const scrollToMarkdown = (n, source = "pdf") =>
+    scrollMarkdownRatio(n, 0, source);
   useEffect(() => {
     const pane = pdfHolder.current;
     if (!pane) return;
@@ -391,18 +454,11 @@ export default function App() {
     pageScrollTick.current = requestAnimationFrame(() => {
       pageScrollTick.current = null;
       if (scrollGuard.current === "md" || scrollGuard.current === "nav") return;
-      const pane = pdfHolder.current;
-      if (!pane) return;
-      const line = pane.getBoundingClientRect().top + pane.clientHeight * 0.35;
-      const sections = [...pane.querySelectorAll("[data-pdf-page]")];
-      const hit =
-        sections.find((el) => el.getBoundingClientRect().bottom > line) ||
-        sections[sections.length - 1];
-      const n = Number(hit?.dataset.pdfPage);
-      if (n && n !== currentPage) {
-        setCurrentPage(n);
-        if (synced) scrollToMarkdown(n, "pdf");
-      }
+      const position = readingPosition(pdfHolder.current, "[data-pdf-page]");
+      if (!position?.page) return;
+      setCurrentPage(position.page);
+      if (synced && !editing)
+        scrollMarkdownRatio(position.page, position.ratio, "pdf");
     });
   };
   const onMarkdownScroll = () => {
@@ -412,18 +468,10 @@ export default function App() {
       if (scrollGuard.current === "pdf" || scrollGuard.current === "nav")
         return;
       if (!synced || editing) return;
-      const pane = mdScrollRef.current;
-      if (!pane) return;
-      const line = pane.getBoundingClientRect().top + pane.clientHeight * 0.32;
-      const blocks = [...pane.querySelectorAll("[data-page]")];
-      const hit =
-        blocks.find((el) => el.getBoundingClientRect().bottom > line) ||
-        blocks[blocks.length - 1];
-      const n = Number(hit?.dataset.page);
-      if (n && n !== currentPage) {
-        setCurrentPage(n);
-        scrollToPdf(n, "md");
-      }
+      const position = readingPosition(mdScrollRef.current, "[data-page]");
+      if (!position?.page) return;
+      setCurrentPage(position.page);
+      scrollPdfRatio(position.page, position.ratio, "md");
     });
   };
   useEffect(
@@ -596,9 +644,6 @@ export default function App() {
     if (!totalPages) return;
     const n = Math.max(1, Math.min(totalPages, p));
     setCurrentPage(n);
-    setHighlight(null);
-    setMdMatch(null);
-    setMdFocus(null);
     scrollToPdf(n, "nav");
     if (scrollMd && synced) scrollToMarkdown(n, "nav");
   };
@@ -690,31 +735,31 @@ export default function App() {
     }
     const page = best.block.pdfPage || pdfPage;
     setMdFocus(page);
-    setMdMatch({ selection, page, context });
+    setMdMatch({ selection, page, context, blockIndex: best.block.index });
     if (best.block.pdfPage) setCurrentPage(page);
-    const target = document.querySelector('[data-page="' + page + '"]');
-    target?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     setStatus("已定位到 Markdown 对应字词");
     return true;
   };
 
   // A PDF text-layer selection must remain highlighted even after the browser selection disappears.
-  const focusPdfToMd = (selection, context = {}) => {
+  const focusPdfToMd = (selection, pdfPage, context = {}) => {
     if (!synced) return;
     const m = matchPdfTextSlices(
-      pdfItems[currentPage - 1] || [],
+      pdfItems[pdfPage - 1] || [],
       selection,
       context,
     );
     if (m?.slices?.length && m.score >= 380) {
       setHighlight({
-        page: currentPage,
+        page: pdfPage,
         slices: m.slices,
         score: m.score,
         selection,
       });
+      scrollToPdf(pdfPage, "nav", m.slices[0]);
     }
-    focusMdSelection(selection, currentPage, context);
+    setCurrentPage(pdfPage);
+    focusMdSelection(selection, pdfPage, context);
   };
 
   // Unlike mouseup-only handlers, this also covers keyboard selections and touch selections.
@@ -723,7 +768,7 @@ export default function App() {
       if (!synced || editing) return;
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || !selection.rangeCount) {
-        selectionSignature.current = "";
+        selectionSignature.current = null;
         return;
       }
       const range = selection.getRangeAt(0);
@@ -737,33 +782,20 @@ export default function App() {
       if (!inMd && !inPdf) return;
       const text = selection.toString().trim();
       if (normalizeText(text).length < 2 || text.length > 1000) return;
-      const key =
-        (inMd ? "md" : "pdf") +
-        ":" +
-        currentPage +
-        ":" +
-        text +
-        ":" +
-        range.startOffset +
-        ":" +
-        range.endOffset;
-      if (key === selectionSignature.current) return;
-      selectionSignature.current = key;
-      const scope = inMd || inPdf;
-      const pre = document.createRange();
-      pre.selectNodeContents(scope);
-      pre.setEnd(range.startContainer, range.startOffset);
-      const post = document.createRange();
-      post.selectNodeContents(scope);
-      post.setStart(range.endContainer, range.endOffset);
-      const before = stripEditorialNoise(pre.toString()).slice(-80);
-      const after = stripEditorialNoise(post.toString()).slice(0, 80);
-      const sum = normalizeText(before + text + after).length;
-      const context = {
-        before,
-        after,
-        progress: sum ? normalizeText(before).length / sum : 0,
-      };
+      const pdfPage = Number(
+        inPdf?.closest("[data-pdf-page]")?.dataset.pdfPage,
+      );
+      const previous = selectionSignature.current;
+      if (
+        previous?.text === text &&
+        previous.range.startContainer === range.startContainer &&
+        previous.range.endContainer === range.endContainer &&
+        previous.range.startOffset === range.startOffset &&
+        previous.range.endOffset === range.endOffset
+      )
+        return;
+      selectionSignature.current = { text, range: range.cloneRange() };
+      const context = extractSelectionContext(range, inMd || inPdf);
       if (inMd) {
         const block = inMd.closest(".md-page-block");
         const page =
@@ -774,7 +806,7 @@ export default function App() {
           context,
         );
       } else {
-        focusPdfToMd(text, context);
+        focusPdfToMd(text, pdfPage, context);
       }
     };
     const schedule = () => {
@@ -798,8 +830,11 @@ export default function App() {
     CSS.highlights.delete("collatio-md-match");
     if (!mdMatch || editing) return;
     const blocks = [...document.querySelectorAll(".md-page-block")];
-    const preferred = blocks.filter(
-      (b) => Number(b.closest("[data-page]")?.dataset.page) === mdMatch.page,
+    const preferred = blocks.filter((b) =>
+      mdMatch.blockIndex != null
+        ? Number(b.closest("[data-block-index]")?.dataset.blockIndex) ===
+          mdMatch.blockIndex
+        : Number(b.closest("[data-page]")?.dataset.page) === mdMatch.page,
     );
     const choices = preferred.length ? preferred : blocks;
     for (const block of choices) {
@@ -827,38 +862,65 @@ export default function App() {
       }
       if (!ranges.length) continue;
       CSS.highlights.set("collatio-md-match", new Highlight(...ranges));
-      const target = ranges[0].getBoundingClientRect();
-      const pane = mdScrollRef.current;
-      if (pane && target.height) {
-        const view = pane.getBoundingClientRect();
-        if (target.top < view.top + 32 || target.bottom > view.bottom - 32) {
-          pane.scrollTo({
-            top:
-              pane.scrollTop + target.top - view.top - pane.clientHeight * 0.36,
-            behavior: "smooth",
-          });
-        }
-      }
+      alignRange(mdScrollRef.current, ranges[0]);
       break;
     }
     return () => CSS.highlights.delete("collatio-md-match");
   }, [mdMatch, markdown, editing]);
 
   const demoMdToPdf = () => {
-    const selection = "所谓校勘，并非追求一个脱离历史的";
-    if (currentPage !== 1) setCurrentPage(1);
-    scrollToPdf(1, "nav");
-    focusPdfSelection(selection, 1, {}, true);
+    const sampleText = "数字工具的价值，在于让细节重新变得可见";
+    const sampleMatch = matchPdfTextSlices(pdfItems[0] || [], sampleText);
+    if (
+      normalizeText(markdown).includes(normalizeText(sampleText)) &&
+      sampleMatch?.score >= 380
+    ) {
+      focusPdfSelection(sampleText, 1);
+      return;
+    }
+    const paragraph =
+      mdScrollRef.current?.querySelector(
+        '[data-page="' + currentPage + '"] .md-prose p',
+      ) || mdScrollRef.current?.querySelector(".md-prose p");
+    if (!paragraph) return notify("请先载入有文字层的 PDF 和 Markdown");
+    const range = document.createRange();
+    range.selectNodeContents(paragraph);
+    focusPdfSelection(
+      paragraph.textContent.trim(),
+      Number(paragraph.closest("[data-page]")?.dataset.page) || null,
+      extractSelectionContext(range, paragraph.closest(".md-prose")),
+    );
   };
   const demoPdfToMd = () => {
-    const selection = "PDF 保留了版面、页码与视觉证据";
-    const items = pdfItems[1] || [];
+    const sampleText = "只有把出处放在眼前，才可能把解释留在证据之内";
+    const sampleMatch = matchPdfTextSlices(pdfItems[1] || [], sampleText);
+    const sample =
+      sampleMatch?.score >= 380 &&
+      normalizeText(markdown).includes(normalizeText(sampleText));
+    const page = sample ? 2 : Math.max(1, Math.min(currentPage, totalPages));
+    const selection = sample
+      ? sampleText
+      : (pageTexts[page - 1] || "").trim().slice(0, 120);
+    if (!selection) return notify("请先载入有文字层的 PDF");
+    const items = pdfItems[page - 1] || [];
     const m = matchPdfTextSlices(items, selection);
     if (m?.slices?.length)
-      setHighlight({ page: 2, slices: m.slices, score: m.score, selection });
-    setCurrentPage(2);
-    scrollToPdf(2, "nav");
-    focusMdSelection(selection, 2, {}, true);
+      setHighlight({ page, slices: m.slices, score: m.score, selection });
+    setCurrentPage(page);
+    scrollToPdf(page, "nav", m?.slices?.[0]);
+    focusMdSelection(selection, page);
+  };
+  const demoContinuousScroll = () => {
+    if (!totalPages) return notify("请先载入 PDF");
+    const page = Math.min(6, totalPages);
+    setSynced(true);
+    setEditing(false);
+    setCurrentPage(page);
+    requestAnimationFrame(() => {
+      scrollPdfRatio(page, 0.55, "nav");
+      scrollMarkdownRatio(page, 0.55, "nav");
+    });
+    setStatus(`第 ${page} 页 · 两栏按页内 55% 位置对齐；滚动任一栏继续体验`);
   };
 
   const chooseSearchHit = (hit) => {
@@ -999,6 +1061,7 @@ export default function App() {
     setMarkdown(await f.text());
     setMdName(f.name);
     setMdFocus(null);
+    setMdMatch(null);
     setHighlight(null);
     notify("Markdown 已导入；可以划选文本对照 PDF");
     e.target.value = "";
@@ -1013,6 +1076,9 @@ export default function App() {
       mdImportRevision.current += 1;
       setMarkdown(await md.text());
       setMdName(md.name);
+      setMdFocus(null);
+      setMdMatch(null);
+      setHighlight(null);
       notify("文件已导入");
     }
   };
@@ -1229,7 +1295,17 @@ export default function App() {
                   <button
                     role="menuitem"
                     onClick={() => {
-                      setSynced((value) => !value);
+                      setSynced(!synced);
+                      if (!synced && !editing) {
+                        const position = readingPosition(
+                          mdScrollRef.current,
+                          "[data-page]",
+                        );
+                        if (position?.page) {
+                          setCurrentPage(position.page);
+                          scrollPdfRatio(position.page, position.ratio, "nav");
+                        }
+                      }
                       setMoreOpen(false);
                     }}
                   >
@@ -1357,6 +1433,9 @@ export default function App() {
                   <Layers3 size={17} />
                 </span>
                 <strong>双轨校勘</strong>
+                <span className="demo-version" title="与 Obsidian 插件版本同步">
+                  v{manifest.version}
+                </span>
                 <span
                   className="document-pair"
                   title={mdName + " ↔ " + pdfName}
@@ -1398,37 +1477,48 @@ export default function App() {
                     </span>
                     <span className="file-type">MARKDOWN</span>
                   </div>
-                  <div
-                    ref={mdScrollRef}
-                    className="md-scroll"
-                    onScroll={onMarkdownScroll}
-                  >
-                    <div className="md-document">
-                      <div className="doc-headline">
-                        <span className="doc-type">
-                          ANNOTATED TEXT · 校勘底稿
-                        </span>
-                        <h2>{mdName.replace(/\.md$/i, "")}</h2>
-                        <span className="doc-underline" />
-                      </div>
-                      {displayBlocks.map((block, index) => (
-                        <div key={index} data-page={String(block.pdfPage || 1)}>
-                          <MarkdownBlock
-                            block={block}
-                            active={(block.pdfPage || 1) === currentPage}
-                            highlighted={mdFocus === (block.pdfPage || 1)}
-                            pageFallback={1}
-                            onClick={goToPage}
-                            onSelect={(text, page) =>
-                              focusPdfSelection(text, page)
-                            }
-                            editing={editing}
-                            onChange={changeBlock}
-                          />
+                  <div className="reading-surface">
+                    <ReadingGuide visible={synced && !editing} />
+                    <div
+                      ref={mdScrollRef}
+                      className="md-scroll"
+                      onScroll={onMarkdownScroll}
+                      onWheel={releaseScroll}
+                      onPointerDown={releaseScroll}
+                      onTouchStart={releaseScroll}
+                      onKeyDown={releaseScroll}
+                    >
+                      <div className="md-document">
+                        <div className="doc-headline">
+                          <span className="doc-type">
+                            ANNOTATED TEXT · 校勘底稿
+                          </span>
+                          <h2>{mdName.replace(/\.md$/i, "")}</h2>
+                          <span className="doc-underline" />
                         </div>
-                      ))}
-                      <div className="end-of-document">
-                        END OF DOCUMENT <span>✦</span>
+                        {displayBlocks.map((block, index) => (
+                          <div
+                            key={index}
+                            data-page={block.pdfPage ?? undefined}
+                            data-block-index={block.index}
+                          >
+                            <MarkdownBlock
+                              block={block}
+                              active={(block.pdfPage || 1) === currentPage}
+                              highlighted={mdFocus === (block.pdfPage || 1)}
+                              pageFallback={1}
+                              onClick={goToPage}
+                              onSelect={(text, page, context) =>
+                                focusPdfSelection(text, page, context)
+                              }
+                              editing={editing}
+                              onChange={changeBlock}
+                            />
+                          </div>
+                        ))}
+                        <div className="end-of-document">
+                          END OF DOCUMENT <span>✦</span>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1502,56 +1592,68 @@ export default function App() {
                       </button>
                     </div>
                   </div>
-                  <div
-                    ref={pdfHolder}
-                    className="pdf-scroll continuous-pdf"
-                    onScroll={onPdfScroll}
-                  >
-                    {Array.from({ length: totalPages }, (_, i) => i + 1).map(
-                      (n) => {
-                        const size = pdfSizes[n - 1] ||
-                          pdfSizes[0] || { width: 595, height: 842 };
-                        const width = Math.round(
-                          Math.min(
-                            size.width * 1.55,
-                            Math.max(240, pdfPaneWidth - 78),
-                          ) * zoom,
-                        );
-                        const height = Math.round(
-                          (width * size.height) / size.width,
-                        );
-                        return (
-                          <section
-                            className="pdf-page-section"
-                            data-pdf-page={n}
-                            key={n}
-                          >
-                            {Math.abs(currentPage - n) <= 2 ? (
-                              <PDFPage
-                                doc={pdfDoc}
-                                items={pdfItems}
-                                page={n}
-                                width={width}
-                                height={height}
-                                highlight={highlight}
-                              />
-                            ) : (
-                              <div className="pdf-stage continuous-stage">
-                                <div
-                                  className="pdf-placeholder"
-                                  style={{ width, height }}
-                                  aria-label={"PDF 第 " + n + " 页，滚动后加载"}
+                  <div className="reading-surface">
+                    <ReadingGuide visible={synced && !editing} />
+                    <div
+                      ref={pdfHolder}
+                      className="pdf-scroll continuous-pdf"
+                      onScroll={onPdfScroll}
+                      onWheel={releaseScroll}
+                      onPointerDown={releaseScroll}
+                      onTouchStart={releaseScroll}
+                      onKeyDown={releaseScroll}
+                    >
+                      {Array.from({ length: totalPages }, (_, i) => i + 1).map(
+                        (n) => {
+                          const size = pdfSizes[n - 1] ||
+                            pdfSizes[0] || { width: 595, height: 842 };
+                          const width = Math.round(
+                            Math.min(
+                              size.width * 1.55,
+                              Math.max(240, pdfPaneWidth - 78),
+                            ) * zoom,
+                          );
+                          const height = Math.round(
+                            (width * size.height) / size.width,
+                          );
+                          return (
+                            <section
+                              className="pdf-page-section"
+                              data-pdf-page={n}
+                              key={n}
+                            >
+                              {Math.abs(currentPage - n) <= 2 ||
+                              highlight?.page === n ? (
+                                <PDFPage
+                                  doc={pdfDoc}
+                                  items={pdfItems}
+                                  page={n}
+                                  width={width}
+                                  height={height}
+                                  highlight={highlight}
                                 />
-                                <div className="pdf-under">
-                                  <span>ORIGINAL DOCUMENT</span>
-                                  <span>PAGE {String(n).padStart(2, "0")}</span>
+                              ) : (
+                                <div className="pdf-stage continuous-stage">
+                                  <div
+                                    className="pdf-placeholder"
+                                    style={{ width, height }}
+                                    aria-label={
+                                      "PDF 第 " + n + " 页，滚动后加载"
+                                    }
+                                  />
+                                  <div className="pdf-under">
+                                    <span>ORIGINAL DOCUMENT</span>
+                                    <span>
+                                      PAGE {String(n).padStart(2, "0")}
+                                    </span>
+                                  </div>
                                 </div>
-                              </div>
-                            )}
-                          </section>
-                        );
-                      },
-                    )}
+                              )}
+                            </section>
+                          );
+                        },
+                      )}
+                    </div>
                   </div>
                   <div className="pane-footer pdf-footer">
                     <span>
@@ -1579,7 +1681,7 @@ export default function App() {
         <div className="tour-card" role="dialog" aria-label="双轨校勘新手引导">
           <div className="tour-top">
             <span className="tour-kicker">INTERACTIVE GUIDE</span>
-            <span className="tour-count">{tourStep + 1} / 4</span>
+            <span className="tour-count">{tourStep + 1} / 5</span>
             <button
               className="icon-button"
               aria-label="退出教程"
@@ -1589,7 +1691,7 @@ export default function App() {
             </button>
           </div>
           <div className="tour-progress">
-            {[0, 1, 2, 3].map((n) => (
+            {[0, 1, 2, 3, 4].map((n) => (
               <span key={n} className={n <= tourStep ? "active" : ""} />
             ))}
           </div>
@@ -1599,6 +1701,7 @@ export default function App() {
                 "欢迎来到双轨校勘",
                 "让 Markdown 自动定位 PDF",
                 "从 PDF 反向高亮 Markdown",
+                "沿着同一条基准线连续阅读",
                 "换成你自己的文献",
               ][tourStep]
             }
@@ -1606,10 +1709,11 @@ export default function App() {
           <p>
             {
               [
-                "这不是两份独立的阅读器。左栏是可编辑的校勘稿，右栏是原始 PDF；默认已经放入一份三页示例供你体验。",
-                "在左栏划选一句话，或者直接点击一个段落。右栏会找到对应页，并将匹配的原文字词标成黄色。",
-                "也可以在右栏 PDF 上划选文字，左边会自动找到并突出对应字词。下面的按钮会帮你演示一次。",
-                "上传自己的 PDF 会生成 Markdown 底稿；也能导入已有 Markdown。修改后点击“导出 MD”保存文件，全部在本地完成。",
+                `左栏是可编辑的校勘稿，右栏是原始 PDF。十二页示例已准备好，可体验 ${manifest.version} 的连续联动、上下文定位和持久高亮。`,
+                "在 Markdown 中划选一句话，或者直接点击一个段落。PDF 会定位到对应文字，并沿阅读基准线对齐；重复词会结合前后文和页内位置匹配。",
+                "在 PDF 上划选文字，Markdown 也会定位并高亮。取消原生选区、滚动翻页或调整缩放后，匹配高亮仍会保留，直到下一次定位。",
+                "浅色虚线位于阅读区域的 35%。滚动任一栏时，另一栏会跟随同一页内的相对位置；无需等到翻页。点击下方按钮试读第六页，再滚动任一栏。",
+                "导入自己的 PDF 会生成 Markdown 底稿，也能导入已有 Markdown。修改后点击“导出”保存文件，全部在浏览器本地完成。",
               ][tourStep]
             }
           </p>
@@ -1626,6 +1730,11 @@ export default function App() {
             </button>
           )}
           {tourStep === 3 && (
+            <button className="tour-demo-button" onClick={demoContinuousScroll}>
+              <Link2 size={15} /> 演示：页内连续联动 <Play size={13} />
+            </button>
+          )}
+          {tourStep === 4 && (
             <div className="tour-import">
               <button
                 onClick={() => {
@@ -1652,7 +1761,7 @@ export default function App() {
                 setTourStep(-1);
               }}
             >
-              {tourStep === 3 ? "完成教程" : "跳过教程"}
+              {tourStep === 4 ? "完成教程" : "跳过教程"}
             </button>
             <div className="tour-buttons">
               {tourStep > 0 && (
@@ -1666,12 +1775,12 @@ export default function App() {
               <button
                 className="btn primary"
                 onClick={() => {
-                  if (tourStep === 3) {
+                  if (tourStep === 4) {
                     setTourStep(-1);
                   } else setTourStep((s) => s + 1);
                 }}
               >
-                {tourStep === 3 ? "开始使用" : "下一步"}{" "}
+                {tourStep === 4 ? "开始使用" : "下一步"}{" "}
                 <ArrowRight size={13} />
               </button>
             </div>
